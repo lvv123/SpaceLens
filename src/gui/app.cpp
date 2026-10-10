@@ -297,6 +297,60 @@ void navigate_up() {
     }
 }
 
+void setup_style(float scale) {
+    ImGui::StyleColorsDark();
+    ImGuiStyle& s = ImGui::GetStyle();
+    s.WindowRounding = 0.0f;
+    s.ChildRounding = 8.0f;
+    s.FrameRounding = 6.0f;
+    s.PopupRounding = 8.0f;
+    s.GrabRounding = 6.0f;
+    s.ScrollbarRounding = 8.0f;
+    s.TabRounding = 6.0f;
+    s.WindowBorderSize = 0.0f;
+    s.ChildBorderSize = 1.0f;
+    s.FrameBorderSize = 0.0f;
+    s.PopupBorderSize = 1.0f;
+    s.WindowPadding = ImVec2(14.0f, 12.0f);
+    s.FramePadding = ImVec2(10.0f, 6.0f);
+    s.CellPadding = ImVec2(8.0f, 6.0f);
+    s.ItemSpacing = ImVec2(10.0f, 8.0f);
+    s.ItemInnerSpacing = ImVec2(8.0f, 6.0f);
+    s.ScrollbarSize = 13.0f;
+    s.GrabMinSize = 12.0f;
+
+    ImVec4* c = s.Colors;
+    c[ImGuiCol_WindowBg]             = ImVec4(0.086f, 0.094f, 0.113f, 1.00f);
+    c[ImGuiCol_ChildBg]              = ImVec4(0.117f, 0.129f, 0.157f, 1.00f);
+    c[ImGuiCol_PopupBg]              = ImVec4(0.109f, 0.121f, 0.149f, 0.98f);
+    c[ImGuiCol_Border]               = ImVec4(0.235f, 0.259f, 0.310f, 0.70f);
+    c[ImGuiCol_FrameBg]              = ImVec4(0.160f, 0.180f, 0.220f, 1.00f);
+    c[ImGuiCol_FrameBgHovered]       = ImVec4(0.220f, 0.250f, 0.310f, 1.00f);
+    c[ImGuiCol_FrameBgActive]        = ImVec4(0.260f, 0.300f, 0.370f, 1.00f);
+    c[ImGuiCol_TitleBg]              = ImVec4(0.070f, 0.078f, 0.098f, 1.00f);
+    c[ImGuiCol_TitleBgActive]        = ImVec4(0.098f, 0.110f, 0.137f, 1.00f);
+    c[ImGuiCol_Button]               = ImVec4(0.204f, 0.420f, 0.720f, 1.00f);
+    c[ImGuiCol_ButtonHovered]        = ImVec4(0.263f, 0.502f, 0.820f, 1.00f);
+    c[ImGuiCol_ButtonActive]         = ImVec4(0.173f, 0.361f, 0.630f, 1.00f);
+    c[ImGuiCol_Header]               = ImVec4(0.220f, 0.300f, 0.440f, 0.80f);
+    c[ImGuiCol_HeaderHovered]        = ImVec4(0.278f, 0.380f, 0.550f, 0.90f);
+    c[ImGuiCol_HeaderActive]         = ImVec4(0.302f, 0.420f, 0.600f, 1.00f);
+    c[ImGuiCol_Separator]            = ImVec4(0.235f, 0.259f, 0.310f, 0.60f);
+    c[ImGuiCol_SliderGrab]           = ImVec4(0.349f, 0.620f, 0.950f, 1.00f);
+    c[ImGuiCol_SliderGrabActive]     = ImVec4(0.450f, 0.700f, 1.000f, 1.00f);
+    c[ImGuiCol_CheckMark]            = ImVec4(0.450f, 0.700f, 1.000f, 1.00f);
+    c[ImGuiCol_Text]                 = ImVec4(0.920f, 0.930f, 0.960f, 1.00f);
+    c[ImGuiCol_TextDisabled]         = ImVec4(0.500f, 0.520f, 0.580f, 1.00f);
+    c[ImGuiCol_ScrollbarBg]          = ImVec4(0.098f, 0.110f, 0.137f, 1.00f);
+    c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.278f, 0.310f, 0.380f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.350f, 0.390f, 0.470f, 1.00f);
+    c[ImGuiCol_TableHeaderBg]        = ImVec4(0.149f, 0.170f, 0.216f, 1.00f);
+    c[ImGuiCol_TableRowBg]           = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+    c[ImGuiCol_TableRowBgAlt]        = ImVec4(1.0f, 1.0f, 1.0f, 0.025f);
+
+    s.ScaleAllSizes(scale);
+}
+
 void load_font(float scale) {
     ImGuiIO& io = ImGui::GetIO();
     const float size = 18.0f * scale;
@@ -314,9 +368,15 @@ void load_font(float scale) {
 }
 
 void draw_toolbar() {
-    ImGui::TextUnformatted("卷:");
+    const ImGuiStyle& st = ImGui::GetStyle();
+    const float barH = ImGui::GetFrameHeight() + st.WindowPadding.y * 2.0f + 2.0f;
+    ImGui::BeginChild("##toolbar", ImVec2(0, barH), ImGuiChildFlags_Borders,
+                      ImGuiWindowFlags_NoScrollbar);
+
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("卷");
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(110);
+    ImGui::SetNextItemWidth(100.0f);
     const std::string currentVol =
         g_volumes.empty() ? std::string("(无)") : cs::wide_to_utf8(g_volumes[g_volumeIndex]);
     if (ImGui::BeginCombo("##vol", currentVol.c_str())) {
@@ -327,37 +387,42 @@ void draw_toolbar() {
         ImGui::EndCombo();
     }
 
-    ImGui::SameLine();
+    ImGui::SameLine(0, 18);
     ImGui::BeginDisabled(g_scanning.load());
-    if (ImGui::Button("扫描")) start_scan();
+    if (ImGui::Button("  扫描  ")) start_scan();
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::BeginDisabled(!g_scanning.load());
     if (ImGui::Button("取消")) g_progress.cancel.store(true);
     ImGui::EndDisabled();
 
+    ImGui::SameLine(0, 26);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("阈值");
     ImGui::SameLine();
-    ImGui::TextUnformatted("阈值:");
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(190);
-    float logv = (g_threshold > 0) ? static_cast<float>(std::log10(static_cast<double>(g_threshold)))
-                                   : 3.0f;
+    ImGui::SetNextItemWidth(200.0f);
+    float logv =
+        (g_threshold > 0) ? static_cast<float>(std::log10(static_cast<double>(g_threshold))) : 3.0f;
     if (logv < 3.0f) logv = 3.0f;
     if (ImGui::SliderFloat("##thresh", &logv, 3.0f, 10.5f, "")) {
         g_threshold = static_cast<uint64_t>(std::pow(10.0, static_cast<double>(logv)));
         if (g_threshold < 1024) g_threshold = 1024;
     }
     ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
     ImGui::Text("%s", cs::human_size(g_threshold).c_str());
 
-    ImGui::SameLine();
-    ImGui::TextUnformatted("面积:");
+    ImGui::SameLine(0, 26);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("面积");
     ImGui::SameLine();
     int basis = static_cast<int>(g_basis);
     if (ImGui::RadioButton("逻辑", basis == 0)) basis = 0;
     ImGui::SameLine();
     if (ImGui::RadioButton("占用", basis == 1)) basis = 1;
     g_basis = static_cast<gui::SizeBasis>(basis);
+
+    ImGui::EndChild();
 }
 
 void draw_other_popup() {
@@ -368,7 +433,7 @@ void draw_other_popup() {
     if (ImGui::BeginPopupModal("已过滤的项", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::Text("小于阈值 %s 的项（共 %zu 个）：", cs::human_size(g_threshold).c_str(),
                     g_otherNodes.size());
-        ImGui::BeginChild("##otherlist", ImVec2(460, 320));
+        ImGui::BeginChild("##otherlist", ImVec2(460, 320), ImGuiChildFlags_Borders);
         int shown = 0;
         for (uint32_t n : g_otherNodes) {
             if (shown++ >= 500) {
@@ -388,7 +453,8 @@ void draw_other_popup() {
 }
 
 void draw_treemap_panel(float width, float height) {
-    ImGui::BeginChild("treemap", ImVec2(width, height), true, ImGuiWindowFlags_NoScrollbar);
+    ImGui::BeginChild("treemap", ImVec2(width, height), ImGuiChildFlags_Borders,
+                      ImGuiWindowFlags_NoScrollbar);
     if (g_scanning.load()) {
         const uint64_t total = g_progress.totalRecords.load();
         const uint64_t read = g_progress.recordsRead.load();
@@ -425,74 +491,155 @@ void draw_treemap_panel(float width, float height) {
 }
 
 void draw_list_panel(float width, float height) {
-    ImGui::BeginChild("list", ImVec2(width, height), true);
+    ImGui::BeginChild("list", ImVec2(width, height), ImGuiChildFlags_Borders);
+
     if (g_path.size() > 1) {
-        if (ImGui::Button("< 上级")) navigate_up();
-        ImGui::SameLine();
+        if (ImGui::Button("↑")) navigate_up();
+    } else {
+        ImGui::BeginDisabled(true);
+        ImGui::Button("↑");
+        ImGui::EndDisabled();
     }
-    std::string crumb;
+    ImGui::SameLine();
     for (size_t i = 0; i < g_path.size(); ++i) {
-        crumb += cs::wide_to_utf8(g_tree.nameString(g_path[i]));
-        if (i + 1 < g_path.size()) crumb += " / ";
+        if (i > 0) {
+            ImGui::SameLine(0, 6);
+            ImGui::TextDisabled("/");
+            ImGui::SameLine(0, 6);
+        }
+        const bool last = (i + 1 == g_path.size());
+        std::string seg = cs::wide_to_utf8(g_tree.nameString(g_path[i]));
+        if (seg.empty()) seg = "C:";
+        if (last) {
+            ImGui::TextUnformatted(seg.c_str());
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.72f, 1.0f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.22f, 0.30f, 0.44f, 1.0f));
+            if (ImGui::Selectable(seg.c_str(), false, ImGuiSelectableFlags_None,
+                                  ImVec2(ImGui::CalcTextSize(seg.c_str()).x, 0.0f))) {
+                g_path.resize(i + 1);
+                g_current = g_path.back();
+            }
+            ImGui::PopStyleColor(2);
+        }
     }
-    ImGui::TextWrapped("%s", crumb.c_str());
     ImGui::Separator();
 
-    if (g_current != cs::VolumeTree::kInvalid) {
-        const auto& cur = g_tree.node(g_current);
-        const uint64_t total = cur.totalSize;
-        ImGui::BeginChild("##children");
+    if (g_current == cs::VolumeTree::kInvalid) {
+        ImGui::EndChild();
+        return;
+    }
+
+    const auto& cur = g_tree.node(g_current);
+    const uint64_t total = cur.totalSize;
+
+    const ImGuiTableFlags tflags =
+        ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit;
+    if (ImGui::BeginTable("##children", 3, tflags, ImVec2(0.0f, 0.0f))) {
+        ImGui::TableSetupColumn("名称", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("大小", ImGuiTableColumnFlags_WidthFixed, 104.0f);
+        ImGui::TableSetupColumn("占比", ImGuiTableColumnFlags_WidthFixed, 76.0f);
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableHeadersRow();
+
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const float cellPad = ImGui::GetStyle().CellPadding.y;
         for (uint32_t c = cur.firstChild; c != cs::VolumeTree::kInvalid;
              c = g_tree.node(c).nextSibling) {
             const auto& n = g_tree.node(c);
-            const double pct = total > 0 ? 100.0 * static_cast<double>(n.totalSize) /
-                                               static_cast<double>(total)
-                                         : 0.0;
-            char label[512];
-            std::snprintf(label, sizeof(label), "%s%s    %s    %.1f%%",
-                          g_tree.isDirectory(c) ? "[D] " : "",
-                          cs::wide_to_utf8(g_tree.nameString(c)).c_str(),
-                          cs::human_size(n.totalSize).c_str(), pct);
-            if (ImGui::Selectable(label)) {
-                if (g_tree.isDirectory(c) && n.childCount > 0) navigate_to(c);
-            }
+            const uint64_t sz = (g_basis == gui::SizeBasis::Logical) ? n.totalSize : n.totalAlloc;
+            const double pct =
+                total > 0 ? 100.0 * static_cast<double>(sz) / static_cast<double>(total) : 0.0;
+
+            ImGui::TableNextRow();
+            const ImVec2 rp = ImGui::GetCursorScreenPos();
+            const float rw = ImGui::GetContentRegionAvail().x;
+            const float rh = ImGui::GetTextLineHeight() + cellPad * 2.0f;
+            const ImU32 barCol = g_tree.isDirectory(c) ? IM_COL32(96, 130, 190, 46)
+                                                       : IM_COL32(130, 170, 210, 38);
+            dl->AddRectFilled(rp,
+                              ImVec2(rp.x + static_cast<float>(rw * pct / 100.0), rp.y + rh),
+                              barCol, 3.0f);
+
+            ImGui::TableSetColumnIndex(0);
+            const ImVec2 sp = ImGui::GetCursorScreenPos();
+            const float ty = ImGui::GetTextLineHeight();
+            const ImU32 sw = g_tree.isDirectory(c) ? IM_COL32(88, 108, 150, 255)
+                                                   : gui::category_color(n.category);
+            dl->AddRectFilled(ImVec2(sp.x, sp.y + (ty - 9.0f) * 0.5f),
+                              ImVec2(sp.x + 9.0f, sp.y + (ty + 9.0f) * 0.5f), sw, 2.0f);
+            ImGui::Dummy(ImVec2(15.0f, 0.0f));
+            ImGui::SameLine(0.0f, 0.0f);
+
+            const std::string name = cs::wide_to_utf8(g_tree.nameString(c));
+            ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.24f, 0.34f, 0.50f, 0.55f));
+            ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.28f, 0.40f, 0.58f, 0.70f));
+            ImGui::Selectable(name.c_str(), false, ImGuiSelectableFlags_AllowOverlap);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\n%s", name.c_str(),
+                                                          cs::human_size(sz).c_str());
+            if (ImGui::IsItemClicked() && g_tree.isDirectory(c) && n.childCount > 0) navigate_to(c);
+            ImGui::PopStyleColor(3);
+
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextUnformatted(cs::human_size(sz).c_str());
+            ImGui::TableSetColumnIndex(2);
+            ImGui::Text("%.1f%%", pct);
         }
-        ImGui::EndChild();
+        ImGui::EndTable();
     }
     ImGui::EndChild();
 }
 
 void draw_status() {
-    ImGui::Separator();
+    const ImGuiStyle& st = ImGui::GetStyle();
+    ImGui::BeginChild("##status", ImVec2(0, ImGui::GetFrameHeight() + st.WindowPadding.y * 2.0f),
+                      ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar);
     if (g_scanning.load()) {
-        ImGui::TextUnformatted("扫描中...");
+        ImGui::TextUnformatted("正在扫描...");
     } else if (!g_error.empty()) {
         ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "%s", cs::wide_to_utf8(g_error).c_str());
     } else if (g_current != cs::VolumeTree::kInvalid) {
         const uint64_t total = g_tree.node(g_tree.root()).totalSize;
-        ImGui::Text("合计 %s | 文件 %llu | 文件夹 %llu", cs::human_size(total).c_str(),
-                    static_cast<unsigned long long>(g_progress.fileCount.load()),
-                    static_cast<unsigned long long>(g_progress.dirCount.load()));
+        ImGui::Text("合计 %s", cs::human_size(total).c_str());
+        ImGui::SameLine(0, 16);
+        ImGui::TextDisabled("文件 %llu",
+                            static_cast<unsigned long long>(g_progress.fileCount.load()));
+        ImGui::SameLine(0, 12);
+        ImGui::TextDisabled("文件夹 %llu",
+                            static_cast<unsigned long long>(g_progress.dirCount.load()));
         const uint64_t orphN = g_progress.orphanNodes.load();
         if (orphN > 0) {
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "| 未连接 %llu (%s)",
-                               static_cast<unsigned long long>(orphN),
-                               cs::human_size(g_progress.orphanBytes.load()).c_str());
+            ImGui::SameLine(0, 16);
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "未连接 %llu",
+                               static_cast<unsigned long long>(orphN));
         }
-        ImGui::SameLine();
-        ImGui::Text("| 当前 %s", cs::wide_to_utf8(g_tree.nameString(g_current)).c_str());
     } else {
-        ImGui::Text("%zu 个 NTFS 卷", g_volumes.size());
+        ImGui::TextDisabled("%zu 个 NTFS 卷，选择后点击“扫描”", g_volumes.size());
     }
 
-    ImGui::SameLine(0.0f, 24.0f);
-    ImGui::TextUnformatted("图例:");
-    for (uint8_t cat = 1; cat <= 7; ++cat) {
-        ImGui::SameLine();
-        const ImU32 col = gui::category_color(cat);
-        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(col), "%s", gui::category_name(cat));
+    // Right-aligned legend.
+    float legendW = ImGui::CalcTextSize("图例").x + 10.0f;
+    for (int cat = 1; cat <= 7; ++cat)
+        legendW += 14.0f + ImGui::CalcTextSize(gui::category_name(cat)).x + 8.0f;
+    const float x = ImGui::GetWindowContentRegionMax().x - legendW;
+    if (x > ImGui::GetCursorPosX() + 20.0f) {
+        ImGui::SameLine(x);
+        ImGui::TextDisabled("图例");
+        for (uint8_t cat = 1; cat <= 7; ++cat) {
+            ImGui::SameLine();
+            const ImU32 col = gui::category_color(cat);
+            const ImVec2 sp = ImGui::GetCursorScreenPos();
+            const float ty = ImGui::GetTextLineHeight();
+            ImGui::GetWindowDrawList()->AddRectFilled(
+                ImVec2(sp.x, sp.y + (ty - 9.0f) * 0.5f),
+                ImVec2(sp.x + 10.0f, sp.y + (ty + 9.0f) * 0.5f), col, 2.0f);
+            ImGui::Dummy(ImVec2(13.0f, 0.0f));
+            ImGui::SameLine(0, 0);
+            ImGui::TextUnformatted(gui::category_name(cat));
+        }
     }
+    ImGui::EndChild();
 }
 
 void draw_frame() {
@@ -505,11 +652,11 @@ void draw_frame() {
                      ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollbar);
 
     draw_toolbar();
-    ImGui::Separator();
 
+    const ImGuiStyle& st = ImGui::GetStyle();
+    const float statusH = ImGui::GetFrameHeight() + st.WindowPadding.y * 2.0f;
     const ImVec2 avail = ImGui::GetContentRegionAvail();
-    const float statusH = ImGui::GetFrameHeightWithSpacing() + 6.0f;
-    const float panelH = avail.y - statusH;
+    const float panelH = avail.y - statusH - st.ItemSpacing.y;
     const float leftW = avail.x * 0.60f;
 
     draw_treemap_panel(leftW, panelH);
@@ -553,10 +700,8 @@ int run() {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    ImGui::StyleColorsDark();
-
     const float scale = ImGui_ImplWin32_GetDpiScaleForHwnd(hwnd);
-    ImGui::GetStyle().ScaleAllSizes(scale);
+    setup_style(scale);
     load_font(scale);
 
     ImGui_ImplWin32_Init(hwnd);

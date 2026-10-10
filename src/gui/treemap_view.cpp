@@ -83,6 +83,29 @@ TreemapResult draw_treemap(ImDrawList* draw, const cs::VolumeTree& tree, uint32_
     const ImVec2 mouse = ImGui::GetIO().MousePos;
     const bool can_hover = windowHovered;
 
+    // Hit-test first so the hovered tile can be highlighted while drawing.
+    int hovered = -1;
+    if (can_hover) {
+        for (size_t i = 0; i < rects.size(); ++i) {
+            const cs::Rect r = rects[i];
+            if (mouse.x >= r.x && mouse.x < r.x + r.w && mouse.y >= r.y && mouse.y < r.y + r.h) {
+                hovered = static_cast<int>(i);
+                break;
+            }
+        }
+    }
+
+    auto brighten = [](ImU32 col, int d) -> ImU32 {
+        const int a = static_cast<int>((col >> IM_COL32_A_SHIFT) & 0xFF);
+        int r = static_cast<int>((col >> IM_COL32_R_SHIFT) & 0xFF);
+        int g = static_cast<int>((col >> IM_COL32_G_SHIFT) & 0xFF);
+        int b = static_cast<int>((col >> IM_COL32_B_SHIFT) & 0xFF);
+        r = (r + d > 255) ? 255 : r + d;
+        g = (g + d > 255) ? 255 : g + d;
+        b = (b + d > 255) ? 255 : b + d;
+        return IM_COL32(r, g, b, a);
+    };
+
     for (size_t i = 0; i < rects.size(); ++i) {
         const cs::Rect r = rects[i];
         if (r.w < 0.5f || r.h < 0.5f) continue;
@@ -91,41 +114,42 @@ TreemapResult draw_treemap(ImDrawList* draw, const cs::VolumeTree& tree, uint32_
 
         uint32_t fill;
         if (items[i].node == cs::VolumeTree::kInvalid) {
-            fill = IM_COL32(70, 70, 74, 235);
+            fill = IM_COL32(74, 76, 82, 255);
         } else if (tree.isDirectory(items[i].node)) {
-            fill = IM_COL32(58, 66, 88, 235);
+            fill = IM_COL32(60, 70, 96, 255);
         } else {
             fill = category_color(tree.node(items[i].node).category);
         }
-        draw->AddRectFilled(p0, p1, fill);
-        draw->AddRect(p0, p1, IM_COL32(20, 20, 22, 255));
+        if (static_cast<int>(i) == hovered) fill = brighten(fill, 28);
+
+        draw->AddRectFilled(p0, p1, fill, 3.0f);
+        draw->AddRect(p0, p1, IM_COL32(14, 15, 19, 200), 3.0f, 0, 1.0f);
+        if (static_cast<int>(i) == hovered)
+            draw->AddRect(p0, p1, IM_COL32(150, 200, 255, 255), 3.0f, 0, 2.0f);
 
         if (r.w > 46.0f && r.h > 16.0f) {
-            const std::string label =
-                items[i].node == cs::VolumeTree::kInvalid
-                    ? ("其他 (" + std::to_string(result.otherNodes.size()) + ")")
-                    : std::string();
-            std::string text = label;
-            if (text.empty()) {
+            std::string text;
+            if (items[i].node == cs::VolumeTree::kInvalid)
+                text = "其他 (" + std::to_string(result.otherNodes.size()) + ")";
+            else
                 text = cs::wide_to_utf8(tree.nameString(items[i].node));
-            }
             draw->PushClipRect(p0, p1, true);
-            draw->AddText(ImVec2(r.x + 4.0f, r.y + 3.0f), IM_COL32(240, 240, 245, 255),
+            draw->AddText(ImVec2(r.x + 5.0f, r.y + 4.0f), IM_COL32(0, 0, 0, 170), text.c_str());
+            draw->AddText(ImVec2(r.x + 4.0f, r.y + 3.0f), IM_COL32(245, 246, 250, 255),
                           text.c_str());
             draw->PopClipRect();
         }
+    }
 
-        if (can_hover && mouse.x >= r.x && mouse.x < r.x + r.w && mouse.y >= r.y &&
-            mouse.y < r.y + r.h) {
-            result.hoveredNode = static_cast<int32_t>(i);
-            result.hoveredTree = items[i].node;
-            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                if (items[i].node == cs::VolumeTree::kInvalid) {
-                    result.otherClicked = true;
-                } else {
-                    result.clickedRect = static_cast<int32_t>(i);
-                    result.clickedTree = items[i].node;
-                }
+    if (hovered >= 0) {
+        result.hoveredNode = hovered;
+        result.hoveredTree = items[hovered].node;
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            if (items[hovered].node == cs::VolumeTree::kInvalid) {
+                result.otherClicked = true;
+            } else {
+                result.clickedRect = hovered;
+                result.clickedTree = items[hovered].node;
             }
         }
     }
