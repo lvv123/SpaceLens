@@ -17,6 +17,12 @@ struct ScanProgress {
     std::atomic<uint64_t> recordsRead{0};
     std::atomic<uint64_t> totalRecords{0};
     std::atomic<uint64_t> bytesRead{0};
+    std::atomic<uint64_t> fileCount{0};
+    std::atomic<uint64_t> dirCount{0};
+    std::atomic<uint64_t> orphanNodes{0};   // nodes created but not linked to the root
+    std::atomic<uint64_t> orphanBytes{0};   // their summed self size
+    std::atomic<uint64_t> orphanNoParent{0};   // unlinked: parent record/dir not found
+    std::atomic<uint64_t> orphanSeqMismatch{0};  // unlinked: parent sequence mismatch
     std::atomic<bool>     cancel{false};
     std::atomic<bool>     finished{false};
     std::atomic<bool>     failed{false};

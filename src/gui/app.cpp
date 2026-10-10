@@ -268,6 +268,18 @@ void poll_scan() {
             g_path.assign(1, g_current);
             const uint64_t rs = g_tree.node(g_current).totalSize;
             g_threshold = (rs > 1000) ? rs / 1000 : 1024;
+            char buf[256];
+            std::snprintf(buf, sizeof(buf),
+                          "scan: records=%llu files=%llu dirs=%llu orphans=%llu (%llu bytes) "
+                          "noParent=%llu seqMismatch=%llu",
+                          static_cast<unsigned long long>(g_progress.totalRecords.load()),
+                          static_cast<unsigned long long>(g_progress.fileCount.load()),
+                          static_cast<unsigned long long>(g_progress.dirCount.load()),
+                          static_cast<unsigned long long>(g_progress.orphanNodes.load()),
+                          static_cast<unsigned long long>(g_progress.orphanBytes.load()),
+                          static_cast<unsigned long long>(g_progress.orphanNoParent.load()),
+                          static_cast<unsigned long long>(g_progress.orphanSeqMismatch.load()));
+            dbg(buf);
         }
     }
 }
@@ -458,9 +470,18 @@ void draw_status() {
         ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "%s", cs::wide_to_utf8(g_error).c_str());
     } else if (g_current != cs::VolumeTree::kInvalid) {
         const uint64_t total = g_tree.node(g_tree.root()).totalSize;
-        ImGui::Text("合计 %s | 节点 %zu | 当前 %s", cs::human_size(total).c_str(),
-                    g_tree.nodeCount(),
-                    cs::wide_to_utf8(g_tree.nameString(g_current)).c_str());
+        ImGui::Text("合计 %s | 文件 %llu | 文件夹 %llu", cs::human_size(total).c_str(),
+                    static_cast<unsigned long long>(g_progress.fileCount.load()),
+                    static_cast<unsigned long long>(g_progress.dirCount.load()));
+        const uint64_t orphN = g_progress.orphanNodes.load();
+        if (orphN > 0) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "| 未连接 %llu (%s)",
+                               static_cast<unsigned long long>(orphN),
+                               cs::human_size(g_progress.orphanBytes.load()).c_str());
+        }
+        ImGui::SameLine();
+        ImGui::Text("| 当前 %s", cs::wide_to_utf8(g_tree.nameString(g_current)).c_str());
     } else {
         ImGui::Text("%zu 个 NTFS 卷", g_volumes.size());
     }

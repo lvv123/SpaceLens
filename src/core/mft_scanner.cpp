@@ -245,16 +245,47 @@ bool scan_mft(VolumeReader& reader, const std::wstring& volumeRoot, VolumeTree& 
 
     // Link children to parents, validating the sequence number so recycled
     // records cannot be attached to the wrong directory.
+    uint64_t orphanNoParent = 0;
+    uint64_t orphanSeqMismatch = 0;
     for (uint32_t i = 0; i < tree.nodeCount(); ++i) {
         if (i == rootNode) continue;
         const uint64_t pref = parentRef[i];
         const uint32_t prec = static_cast<uint32_t>(pref & 0xFFFFFFFFFFFFull);
         const uint16_t pseq = static_cast<uint16_t>(pref >> 48);
-        if (prec >= recordCount || prec == i) continue;
+        if (prec >= recordCount || prec == i) {
+            ++orphanNoParent;
+            continue;
+        }
         const uint32_t pnode = dirNode[prec];
-        if (pnode == VolumeTree::kInvalid) continue;
-        if (recSeq[prec] != pseq) continue;
+        if (pnode == VolumeTree::kInvalid) {
+            ++orphanNoParent;
+            continue;
+        }
+        if (recSeq[prec] != pseq) {
+            ++orphanSeqMismatch;
+            continue;
+        }
         tree.link(pnode, i);
+    }
+    progress.orphanNoParent.store(orphanNoParent, std::memory_order_relaxed);
+    progress.orphanSeqMismatch.store(orphanSeqMismatch, std::memory_order_relaxed);
+
+    // Diagnostics: how many nodes exist and how many could not be linked.
+    // (totalSize still holds each node's own size here; aggregate() runs next.)
+    {
+        uint64_t fileCount = 0, dirCount = 0, orphans = 0, orphanBytes = 0;
+        for (uint32_t i = 0; i < tree.nodeCount(); ++i) {
+            const auto& n = tree.node(i);
+            if (tree.isDirectory(i)) ++dirCount; else ++fileCount;
+            if (i != rootNode && n.parent == VolumeTree::kInvalid) {
+                ++orphans;
+                orphanBytes += n.totalSize;
+            }
+        }
+        progress.fileCount.store(fileCount, std::memory_order_relaxed);
+        progress.dirCount.store(dirCount, std::memory_order_relaxed);
+        progress.orphanNodes.store(orphans, std::memory_order_relaxed);
+        progress.orphanBytes.store(orphanBytes, std::memory_order_relaxed);
     }
 
     tree.setRoot(rootNode);

@@ -585,6 +585,12 @@ void test_mft_scan_synthetic() {
 
     // root + docs + a.txt + b.bin + c.txt(root) + c.txt(docs) + orphan = 7
     CHECK(tree.nodeCount() == 7);
+    CHECK(progress.fileCount.load() == 5);
+    CHECK(progress.dirCount.load() == 2);
+    CHECK(progress.orphanNodes.load() == 1);   // orphan.bin (dangling parent)
+    CHECK(progress.orphanBytes.load() == 700);
+    CHECK(progress.orphanNoParent.load() == 1);
+    CHECK(progress.orphanSeqMismatch.load() == 0);
     // 2000 (b) + 500 (c@root) + 1500 (docs) = 4000; orphan is dangling -> excluded
     CHECK(tree.node(root).totalSize == 4000);
 
@@ -619,6 +625,7 @@ void test_mft_sequence_check() {
     // b.bin's parent sequence does not match -> dropped: 500 + 1500 = 2000
     CHECK(tree.node(tree.root()).totalSize == 2000);
     CHECK(find_child(tree, tree.root(), L"b.bin") == cs::VolumeTree::kInvalid);
+    CHECK(progress.orphanSeqMismatch.load() == 1);
 }
 
 void test_mft_bad_images() {
@@ -664,6 +671,8 @@ void test_recursive_scanner() {
     CHECK(cs::scan_directory_recursive(dir.wstring(), tree, progress, error));
     // root + sub + deep + empty + 3 files = 7
     CHECK(tree.nodeCount() == 7);
+    CHECK(progress.fileCount.load() == 3);
+    CHECK(progress.dirCount.load() == 4);
     CHECK(tree.node(tree.root()).totalSize == 6000);
     CHECK(find_child(tree, tree.root(), L"empty") != cs::VolumeTree::kInvalid);
     CHECK(tree.node(find_child(tree, tree.root(), L"empty")).totalSize == 0);

@@ -72,6 +72,14 @@ bool scan_directory_recursive(const std::wstring& path, VolumeTree& tree,
 
     tree.aggregate();
     tree.sortChildrenBySizeDesc();
+    {
+        uint64_t fileCount = 0, dirCount = 0;
+        for (uint32_t i = 0; i < tree.nodeCount(); ++i) {
+            if (tree.isDirectory(i)) ++dirCount; else ++fileCount;
+        }
+        progress.fileCount.store(fileCount, std::memory_order_relaxed);
+        progress.dirCount.store(dirCount, std::memory_order_relaxed);
+    }
     progress.finished.store(true, std::memory_order_relaxed);
     return true;
 }
