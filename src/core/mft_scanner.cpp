@@ -14,26 +14,30 @@ namespace {
 struct HandleGuard {
     HANDLE h = INVALID_HANDLE_VALUE;
     ~HandleGuard() { if (h != INVALID_HANDLE_VALUE) CloseHandle(h); }
+    HandleGuard() = default;
     HandleGuard(const HandleGuard&) = delete;
     HandleGuard& operator=(const HandleGuard&) = delete;
-    HandleGuard() = default;
 };
 
-// Synchronous positional read.
-bool read_volume(HANDLE h, uint64_t offset, void* buf, DWORD size) {
-    LARGE_INTEGER li;
-    li.QuadPart = static_cast<LONGLONG>(offset);
-    if (!SetFilePointerEx(h, li, nullptr, FILE_BEGIN)) return false;
-    DWORD total = 0;
-    auto* p = static_cast<uint8_t*>(buf);
-    while (total < size) {
-        DWORD got = 0;
-        if (!ReadFile(h, p + total, size - total, &got, nullptr)) return false;
-        if (got == 0) return false;
-        total += got;
+// Reads raw volume bytes through a real (synchronous) volume handle.
+struct HandleReader : VolumeReader {
+    HANDLE h = INVALID_HANDLE_VALUE;
+
+    bool read(uint64_t offset, void* buf, uint32_t size) override {
+        LARGE_INTEGER li;
+        li.QuadPart = static_cast<LONGLONG>(offset);
+        if (!SetFilePointerEx(h, li, nullptr, FILE_BEGIN)) return false;
+        DWORD total = 0;
+        auto* p = static_cast<uint8_t*>(buf);
+        while (total < size) {
+            DWORD got = 0;
+            if (!ReadFile(h, p + total, size - total, &got, nullptr)) return false;
+            if (got == 0) return false;
+            total += got;
+        }
+        return true;
     }
-    return true;
-}
+};
 
 }  // namespace
 
@@ -74,26 +78,14 @@ std::vector<std::wstring> list_ntfs_volumes() {
     return out;
 }
 
-bool scan_volume_mft(const std::wstring& volumeRoot, VolumeTree& tree,
-                     ScanProgress& progress, std::wstring& error) {
+bool scan_mft(VolumeReader& reader, const std::wstring& volumeRoot, VolumeTree& tree,
+              ScanProgress& progress, std::wstring& error) {
     tree.clear();
     error.clear();
 
-    const std::wstring device = L"\\\\.\\" + volumeRoot;
-    HandleGuard guard;
-    guard.h = CreateFileW(device.c_str(), GENERIC_READ,
-                          FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-                          FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
-    if (guard.h == INVALID_HANDLE_VALUE) {
-        error = L"无法打开卷 " + volumeRoot + L"（需要管理员权限，且必须是 NTFS）: " +
-                format_win32_error(GetLastError());
-        progress.failed = true;
-        return false;
-    }
-
     uint8_t boot[4096];
-    if (!read_volume(guard.h, 0, boot, sizeof(boot))) {
-        error = L"读取引导扇区失败: " + format_win32_error(GetLastError());
+    if (!reader.read(0, boot, sizeof(boot))) {
+        error = L"读取引导扇区失败";
         progress.failed = true;
         return false;
     }
@@ -116,8 +108,8 @@ bool scan_volume_mft(const std::wstring& volumeRoot, VolumeTree& tree,
     const uint32_t readLen = ((recSize + align - 1) / align) * align;
     std::vector<uint8_t> mftRec(readLen, 0);
     const uint64_t mftOffset = static_cast<uint64_t>(bs.mftLcn) * bs.bytesPerCluster;
-    if (!read_volume(guard.h, mftOffset, mftRec.data(), readLen)) {
-        error = L"读取 $MFT 记录失败: " + format_win32_error(GetLastError());
+    if (!reader.read(mftOffset, mftRec.data(), readLen)) {
+        error = L"读取 $MFT 记录失败";
         progress.failed = true;
         return false;
     }
@@ -228,7 +220,7 @@ bool scan_volume_mft(const std::wstring& volumeRoot, VolumeTree& tree,
             const size_t n = static_cast<size_t>(std::min<uint64_t>(left, chunkBytes));
             if (run.sparse) {
                 std::memset(chunk.data(), 0, n);
-            } else if (!read_volume(guard.h, off, chunk.data(), static_cast<DWORD>(n))) {
+            } else if (!reader.read(off, chunk.data(), static_cast<uint32_t>(n))) {
                 readFailed = true;
                 break;
             } else {
@@ -241,7 +233,7 @@ bool scan_volume_mft(const std::wstring& volumeRoot, VolumeTree& tree,
     }
 
     if (readFailed) {
-        error = L"读取 MFT 数据时失败: " + format_win32_error(GetLastError());
+        error = L"读取 MFT 数据时失败";
         progress.failed = true;
         return false;
     }
@@ -270,6 +262,25 @@ bool scan_volume_mft(const std::wstring& volumeRoot, VolumeTree& tree,
     tree.sortChildrenBySizeDesc();
     progress.finished.store(true, std::memory_order_relaxed);
     return true;
+}
+
+bool scan_volume_mft(const std::wstring& volumeRoot, VolumeTree& tree,
+                     ScanProgress& progress, std::wstring& error) {
+    const std::wstring device = L"\\\\.\\" + volumeRoot;
+    HandleGuard guard;
+    guard.h = CreateFileW(device.c_str(), GENERIC_READ,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                          FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (guard.h == INVALID_HANDLE_VALUE) {
+        tree.clear();
+        error = L"无法打开卷 " + volumeRoot + L"（需要管理员权限，且必须是 NTFS）: " +
+                format_win32_error(GetLastError());
+        progress.failed = true;
+        return false;
+    }
+    HandleReader reader;
+    reader.h = guard.h;
+    return scan_mft(reader, volumeRoot, tree, progress, error);
 }
 
 }  // namespace cs

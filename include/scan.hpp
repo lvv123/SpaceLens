@@ -25,6 +25,18 @@ struct ScanProgress {
 // Drive roots of local NTFS volumes, e.g. {"C:", "D:"}.
 std::vector<std::wstring> list_ntfs_volumes();
 
+// Source of raw volume bytes. Real scans use a volume handle; tests use an
+// in-memory image.
+struct VolumeReader {
+    virtual ~VolumeReader() = default;
+    virtual bool read(uint64_t offset, void* buffer, uint32_t size) = 0;
+};
+
+// Scan an NTFS volume image through `reader` by parsing $MFT directly.
+// This is the testable core of scan_volume_mft.
+bool scan_mft(VolumeReader& reader, const std::wstring& volumeRoot, VolumeTree& tree,
+              ScanProgress& progress, std::wstring& error);
+
 // Scan a whole NTFS volume by parsing $MFT directly. Requires an elevated
 // process. Returns false and sets `error` on failure.
 bool scan_volume_mft(const std::wstring& volumeRoot, VolumeTree& tree,

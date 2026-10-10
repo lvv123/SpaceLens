@@ -39,8 +39,12 @@ ctest --test-dir build -C Release --output-on-failure
 - `src/core/` — `compute_core` static lib: MFT parsing, tree, treemap, scanners.
   **No UI dependencies** so it stays unit-testable.
 - `src/gui/` — Win32 + DirectX 11 + ImGui app (`app.cpp`, `treemap_view.cpp`).
-- `tests/unit_tests.cpp` — core tests (synthetic NTFS records, treemap geometry,
-  recursive-scanner oracle on a temp dir).
+- `tests/unit_tests.cpp` — core tests: synthetic NTFS records, an end-to-end
+  MFT scan over an in-memory volume image, treemap geometry, and a
+  recursive-scanner oracle on a temp dir.
+- `scan_mft(VolumeReader&, ...)` is the testable core of the scanner; tests feed
+  it a `MemoryReader` over a hand-built NTFS image (`build_volume`). Keep new
+  scan logic going through `VolumeReader` so it stays testable.
 - `third_party/imgui` — ImGui submodule (do not edit; update the pin instead).
 
 Sources are listed explicitly in `CMakeLists.txt` (no globbing) — add new files
