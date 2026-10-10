@@ -53,8 +53,8 @@ struct FileRecord {
     uint16_t sequence      = 0;
     uint16_t hardLinkCount = 0;
     uint32_t recordNumber  = 0;
-    uint64_t realSize      = 0;      // logical size in bytes
-    uint64_t allocatedSize = 0;      // size on disk in bytes
+    uint64_t realSize      = 0;      // logical size (unnamed $DATA; fallback $FILE_NAME)
+    uint64_t allocatedSize = 0;      // size on disk (same sources)
     bool     hasStandardInformation = false;
     std::vector<FileNameEntry> names;  // reused across calls (capacity is kept)
 };

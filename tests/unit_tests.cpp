@@ -53,6 +53,24 @@ size_t add_resident(uint8_t* rec, size_t pos, uint32_t type, const uint8_t* cont
     return pos + length;
 }
 
+// Append a non-resident $DATA attribute (single run) and return the next offset.
+size_t add_nonresident(uint8_t* rec, size_t pos, uint64_t allocSize, uint64_t realSize) {
+    const size_t runOff = 64;
+    const uint8_t run[4] = {0x11, 0x01, 0x40, 0x00};  // 1 cluster @ LCN 0x40
+    uint32_t length = static_cast<uint32_t>(runOff + sizeof(run));
+    length = (length + 7u) & ~7u;
+    put32(rec + pos + 0, 0x80);
+    put32(rec + pos + 4, length);
+    rec[pos + 8] = 1;  // non-resident
+    rec[pos + 9] = 0;
+    put16(rec + pos + 32, static_cast<uint16_t>(runOff));
+    put64(rec + pos + 40, allocSize);
+    put64(rec + pos + 48, realSize);
+    put64(rec + pos + 56, realSize);
+    std::memcpy(rec + pos + runOff, run, sizeof(run));
+    return pos + length;
+}
+
 // ---------------------------------------------------------------------------
 // Synthetic FILE records (1024 bytes, 512-byte sectors, USA count 3).
 // ---------------------------------------------------------------------------
@@ -71,23 +89,30 @@ struct RecordBuilder {
         put16(rec + 22, flags);
     }
 
-    size_t addStandardInfo(uint64_t realSize, uint64_t allocSize) {
+    size_t addStandardInfo() {
         uint8_t content[48];
-        std::memset(content, 0, sizeof(content));
-        put64(content + 0x20, allocSize);
-        put64(content + 0x28, realSize);
+        std::memset(content, 0, sizeof(content));  // $STANDARD_INFORMATION: no size fields
+        put32(content + 0x20, 0x20);               // FILE_ATTRIBUTE_ARCHIVE
         attrPos = add_resident(rec, attrPos, 0x10, content, sizeof(content));
         return attrPos;
     }
 
-    size_t addFileName(uint64_t parentRef, const std::wstring& name, uint8_t nameSpace) {
+    size_t addFileName(uint64_t parentRef, const std::wstring& name, uint8_t nameSpace,
+                       uint64_t realSize = 0, uint64_t allocSize = 0) {
         std::vector<uint8_t> content(0x42 + name.size() * 2, 0);
         put64(content.data() + 0, parentRef);
+        put64(content.data() + 0x28, allocSize);  // $FILE_NAME allocated size
+        put64(content.data() + 0x30, realSize);   // $FILE_NAME real size
         content[0x40] = static_cast<uint8_t>(name.size());
         content[0x41] = nameSpace;
         std::memcpy(content.data() + 0x42, name.data(), name.size() * 2);
         attrPos = add_resident(rec, attrPos, 0x30, content.data(),
                                static_cast<uint32_t>(content.size()));
+        return attrPos;
+    }
+
+    size_t addNonresidentData(uint64_t allocSize, uint64_t realSize) {
+        attrPos = add_nonresident(rec, attrPos, allocSize, realSize);
         return attrPos;
     }
 
@@ -190,18 +215,20 @@ std::vector<uint8_t> build_volume(const std::vector<RecSpec>& specs) {
         put16(rec + 20, 56);
         put16(rec + 22, static_cast<uint16_t>(0x0001 | (s.isDir ? 0x0002 : 0)));
         size_t pos = 56;
-        if (!s.isDir && s.size > 0) {
+        if (!s.isDir) {
             uint8_t si[48];
             std::memset(si, 0, sizeof(si));
-            put64(si + 0x20, s.size);
-            put64(si + 0x28, s.size);
+            put32(si + 0x20, 0x20);  // FILE_ATTRIBUTE_ARCHIVE
             pos = add_resident(rec, pos, 0x10, si, sizeof(si));
+            if (s.size > 0) pos = add_nonresident(rec, pos, s.size, s.size);
         }
         for (const auto& nm : s.names) {
             std::vector<uint8_t> content(0x42 + nm.name.size() * 2, 0);
             const uint64_t pref =
                 (static_cast<uint64_t>(nm.parentSeq) << 48) | nm.parent;
             put64(content.data() + 0, pref);
+            put64(content.data() + 0x28, s.isDir ? 0 : s.size);
+            put64(content.data() + 0x30, s.isDir ? 0 : s.size);
             content[0x40] = static_cast<uint8_t>(nm.name.size());
             content[0x41] = nm.nameSpace;
             if (nm.dirFlag) put32(content.data() + 0x38, 0x10000000);
@@ -321,8 +348,9 @@ void test_run_list() {
 
 void test_file_record() {
     RecordBuilder rb(0x0001, 7, 1);
-    rb.addStandardInfo(4096, 4096);
-    rb.addFileName(5, L"hello.txt", 1);
+    rb.addStandardInfo();
+    rb.addFileName(5, L"hello.txt", 1, 4096, 4096);
+    rb.addNonresidentData(4096, 4096);
     rb.finish();
 
     CHECK(cs::ntfs::apply_fixups(rb.rec, 1024, 512));
@@ -334,6 +362,33 @@ void test_file_record() {
     CHECK(fr.names.size() == 1);
     CHECK(fr.names[0].parentRef == 5);
     CHECK(std::wstring(fr.names[0].name, fr.names[0].nameLength) == L"hello.txt");
+}
+
+void test_data_authoritative() {
+    // $DATA wins even when $FILE_NAME carries a different (stale) size.
+    RecordBuilder rb(0x0001, 2, 1);
+    rb.addStandardInfo();
+    rb.addFileName(5, L"stale.bin", 1, 4096, 4096);
+    rb.addNonresidentData(8192, 5000);
+    rb.finish();
+    CHECK(cs::ntfs::apply_fixups(rb.rec, 1024, 512));
+    cs::ntfs::FileRecord fr;
+    CHECK(cs::ntfs::parse_file_record(rb.rec, 1024, 2, 512, fr));
+    CHECK(fr.realSize == 5000);
+    CHECK(fr.allocatedSize == 8192);
+}
+
+void test_size_filename_fallback() {
+    // No $DATA attribute -> fall back to the $FILE_NAME sizes.
+    RecordBuilder rb(0x0001, 2, 1);
+    rb.addStandardInfo();
+    rb.addFileName(5, L"onlyname.bin", 1, 777, 777);
+    rb.finish();
+    CHECK(cs::ntfs::apply_fixups(rb.rec, 1024, 512));
+    cs::ntfs::FileRecord fr;
+    CHECK(cs::ntfs::parse_file_record(rb.rec, 1024, 2, 512, fr));
+    CHECK(fr.realSize == 777);
+    CHECK(fr.allocatedSize == 777);
 }
 
 void test_directory_record() {
@@ -350,7 +405,7 @@ void test_directory_record() {
 
 void test_hardlinks_and_namespaces() {
     RecordBuilder rb(0x0001, 3, 3);
-    rb.addStandardInfo(100, 100);
+    rb.addStandardInfo();
     rb.addFileName(5, L"a.txt", 1);       // Win32
     rb.addFileName(9, L"b.txt", 1);       // Win32 (hard link)
     rb.addFileName(5, L"ASDF~1.TXT", 2);  // DOS short name
@@ -377,7 +432,7 @@ void test_data_fallback() {
 
 void test_bad_fixup() {
     RecordBuilder rb(0x0001, 1, 1);
-    rb.addStandardInfo(1, 1);
+    rb.addStandardInfo();
     rb.finish();
     put16(rb.rec + 510, 0x9999);  // corrupt USA marker
     CHECK(!cs::ntfs::apply_fixups(rb.rec, 1024, 512));
@@ -636,6 +691,8 @@ int main() {
     test_boot_sector();
     test_run_list();
     test_file_record();
+    test_data_authoritative();
+    test_size_filename_fallback();
     test_directory_record();
     test_hardlinks_and_namespaces();
     test_data_fallback();

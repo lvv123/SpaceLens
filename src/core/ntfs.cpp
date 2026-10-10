@@ -159,7 +159,13 @@ bool parse_file_record(const uint8_t* record, size_t recordSize,
     out.sequence    = rd16(record + 16);
     out.hardLinkCount = rd16(record + 18);
 
-    bool sawUnnamedData = false;
+    uint64_t dataReal = 0;
+    uint64_t dataAlloc = 0;
+    bool hasData = false;
+    uint64_t fnReal = 0;
+    uint64_t fnAlloc = 0;
+    bool hasFileNameSize = false;
+
     AttrIterator it(record, recordSize);
     const uint8_t* attr = nullptr;
     uint32_t type = 0, length = 0;
@@ -167,14 +173,8 @@ bool parse_file_record(const uint8_t* record, size_t recordSize,
     while (it.next(attr, type, length, nonResident)) {
         const uint8_t attrNameLen = attr[9];
         if (type == kAttrStandardInformation && !nonResident) {
-            const uint32_t contentLen = rd32(attr + 16);
-            const uint16_t contentOff = rd16(attr + 20);
-            if (static_cast<uint32_t>(contentOff) + contentLen <= length && contentLen >= 48) {
-                const uint8_t* si = attr + contentOff;
-                out.allocatedSize = rd64(si + 0x20);
-                out.realSize      = rd64(si + 0x28);
-                out.hasStandardInformation = true;
-            }
+            // $STANDARD_INFORMATION carries no size fields; only note its presence.
+            out.hasStandardInformation = true;
         } else if (type == kAttrFileName && !nonResident) {
             const uint32_t contentLen = rd32(attr + 16);
             const uint16_t contentOff = rd16(attr + 20);
@@ -190,26 +190,31 @@ bool parse_file_record(const uint8_t* record, size_t recordSize,
                     e.nameSpace  = nameSpace;
                     if (e.nameLength > 0) out.names.push_back(e);
                     if (rd32(fn + 0x38) & 0x10000000u) out.isDirectory = true;
+                    if (!hasFileNameSize) {
+                        fnAlloc = rd64(fn + 0x28);
+                        fnReal  = rd64(fn + 0x30);
+                        hasFileNameSize = true;
+                    }
                 }
             }
-        } else if (type == kAttrData && attrNameLen == 0) {
+        } else if (type == kAttrData && attrNameLen == 0 && !hasData) {
+            // The unnamed $DATA stream is the authoritative size source.
             if (nonResident) {
-                const uint64_t allocSize = rd64(attr + 40);
-                const uint64_t realSize  = rd64(attr + 48);
-                if (!out.hasStandardInformation && !sawUnnamedData) {
-                    out.allocatedSize = allocSize;
-                    out.realSize      = realSize;
-                }
-                sawUnnamedData = true;
+                dataAlloc = rd64(attr + 0x28);
+                dataReal  = rd64(attr + 0x30);
             } else {
-                const uint32_t contentLen = rd32(attr + 16);
-                if (!out.hasStandardInformation && !sawUnnamedData) {
-                    out.realSize = contentLen;
-                    out.allocatedSize = contentLen;
-                }
-                sawUnnamedData = true;
+                dataReal = dataAlloc = rd32(attr + 16);
             }
+            hasData = true;
         }
+    }
+
+    if (hasData) {
+        out.realSize = dataReal;
+        out.allocatedSize = dataAlloc;
+    } else if (hasFileNameSize) {
+        out.realSize = fnReal;
+        out.allocatedSize = fnAlloc;
     }
 
     out.valid = true;

@@ -79,6 +79,10 @@ by hand to the right target.
 - NTFS metadata records are `recordNumber < 16` except the root (record 5);
   everything else (including `$Recycle.Bin`) is counted as a real file.
 - Always run `apply_fixups` before parsing a record or its `$DATA` run list.
+- File size comes from the **unnamed `$DATA` attribute** (non-resident: header
+  `0x28`/`0x30`; resident: content length), falling back to `$FILE_NAME`
+  (`0x28`/`0x30`). `$STANDARD_INFORMATION` has **no** size fields — do not read
+  sizes from it.
 - `squarified_treemap` expects weights sorted descending; it scales them to the
   bounds area internally.
 - The tree is an arena (`std::vector<Node>` + index/sibling links + a name pool),
