@@ -1,7 +1,8 @@
 #pragma once
 
-// Treemap rendering: lays out the children of one node (one level deep, the
-// project's chosen "drill-down" model), draws them, and reports hover/click.
+// Treemap rendering. Draws the current node's children and (nested) their
+// children too, so file-type colors show without drilling in. Reports hover and
+// click for the deepest tile under the cursor.
 
 #include <cstdint>
 #include <vector>
