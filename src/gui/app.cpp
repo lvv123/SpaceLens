@@ -26,6 +26,23 @@ extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam
 namespace gui {
 namespace {
 
+// Optional debug log: set COMPUTE_SPACE_LOG to a file path.
+void dbg(const char* msg) {
+    static FILE* f = nullptr;
+    static bool initialized = false;
+    if (!initialized) {
+        initialized = true;
+        wchar_t path[1024] = {};
+        if (GetEnvironmentVariableW(L"COMPUTE_SPACE_LOG", path, 1024) > 0) {
+            _wfopen_s(&f, path, L"a");
+        }
+    }
+    if (f != nullptr) {
+        std::fprintf(f, "%s\n", msg);
+        std::fflush(f);
+    }
+}
+
 // ---------------------------------------------------------------- Direct3D 11
 ID3D11Device*            g_device = nullptr;
 ID3D11DeviceContext*     g_context = nullptr;
@@ -448,6 +465,7 @@ int run() {
         return 1;
     }
     create_rtv();
+    dbg("device + swapchain created");
     ShowWindow(hwnd, SW_SHOWDEFAULT);
     UpdateWindow(hwnd);
 
@@ -463,6 +481,7 @@ int run() {
 
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_device, g_context);
+    dbg("imgui dx11 initialized");
 
     g_volumes = cs::list_ntfs_volumes();
     g_volumeAccessible = can_open_volume();
@@ -470,6 +489,7 @@ int run() {
     std::wstring devDir;
     if (dev_recursive_dir(devDir)) start_scan();  // auto-start for dev smoke tests
 
+    unsigned long long frame = 0;
     bool done = false;
     while (!done) {
         MSG msg;
@@ -509,6 +529,14 @@ int run() {
 
         const HRESULT hr = g_swapChain->Present(1, 0);  // vsync
         g_swapOccluded = (hr == DXGI_STATUS_OCCLUDED);
+        ++frame;
+        if (frame == 1) dbg("frame 1 rendered");
+        else if (frame % 120 == 0) {
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), "frame %llu, nodes=%zu",
+                          static_cast<unsigned long long>(frame), g_tree.nodeCount());
+            dbg(buf);
+        }
     }
 
     if (g_worker.joinable()) g_worker.join();

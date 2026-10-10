@@ -73,3 +73,10 @@ if(BUILD_TESTING)
     target_link_libraries(unit_tests PRIVATE compute_core)
     add_test(NAME unit_tests COMMAND unit_tests)
 endif()
+
+# ---- optional dev tools ----
+option(COMPUTE_SPACE_TOOLS "Build developer/QA tools" OFF)
+if(COMPUTE_SPACE_TOOLS)
+    add_executable(treemap_image tools/treemap_image.cpp)
+    target_link_libraries(treemap_image PRIVATE compute_core gdiplus)
+endif()

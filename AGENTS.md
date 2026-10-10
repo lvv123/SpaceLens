@@ -60,6 +60,11 @@ by hand to the right target.
 - Dev shortcut: set `COMPUTE_SPACE_DEV_DIR=<dir>` to auto-start a
   `scan_directory_recursive` scan of that directory instead of MFT. Only for
   development without admin; never set in normal runs.
+- `COMPUTE_SPACE_LOG=<file>` writes a tiny GUI debug log (frame counter, node
+  count) — handy since the GUI has no console.
+- Build with `-DCOMPUTE_SPACE_TOOLS=ON` to also get `treemap_image`, which
+  renders a directory's treemap to a PNG headlessly (same core layout/colors as
+  the GUI) — useful to inspect the visualization without elevation.
 
 ## Core conventions / gotchas
 
