@@ -62,6 +62,9 @@ by hand to the right target.
   development without admin; never set in normal runs.
 - `COMPUTE_SPACE_LOG=<file>` writes a tiny GUI debug log (frame counter, node
   count) — handy since the GUI has no console.
+- `COMPUTE_SPACE_CAPTURE=<file.bmp>` renders, dumps the client area to a 32-bit
+  BMP at frame 120, and exits — for headless visual QA (screenshotting a DX
+  surface externally does not work in RDP/headless sessions).
 - Build with `-DCOMPUTE_SPACE_TOOLS=ON` to also get `treemap_image`, which
   renders a directory's treemap to a PNG headlessly (same core layout/colors as
   the GUI) — useful to inspect the visualization without elevation.

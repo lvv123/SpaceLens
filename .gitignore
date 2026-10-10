@@ -33,3 +33,6 @@ compile_commands.json
 # OS
 .DS_Store
 Thumbs.db
+
+# ImGui runtime layout
+imgui.ini

@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <thread>
 #include <vector>
@@ -100,6 +101,63 @@ void cleanup_device() {
     if (g_device)    { g_device->Release();    g_device = nullptr; }
 }
 
+// Dev/QA: dump the current back buffer to a 32-bit BMP (env COMPUTE_SPACE_CAPTURE).
+void save_backbuffer_bmp(const std::wstring& path) {
+    ID3D11Texture2D* back = nullptr;
+    if (FAILED(g_swapChain->GetBuffer(0, IID_PPV_ARGS(&back))) || back == nullptr) return;
+    D3D11_TEXTURE2D_DESC desc{};
+    back->GetDesc(&desc);
+    D3D11_TEXTURE2D_DESC sd = desc;
+    sd.Usage = D3D11_USAGE_STAGING;
+    sd.BindFlags = 0;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    sd.MiscFlags = 0;
+
+    ID3D11Texture2D* staging = nullptr;
+    if (SUCCEEDED(g_device->CreateTexture2D(&sd, nullptr, &staging)) && staging != nullptr) {
+        g_context->CopyResource(staging, back);
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if (SUCCEEDED(g_context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped))) {
+            const uint32_t w = desc.Width;
+            const uint32_t h = desc.Height;
+            FILE* f = nullptr;
+            _wfopen_s(&f, path.c_str(), L"wb");
+            if (f != nullptr) {
+                const uint32_t row_bytes = w * 4;
+                const uint32_t image_size = row_bytes * h;
+                const uint32_t file_size = 54 + image_size;
+                uint8_t hdr[54] = {0};
+                hdr[0] = 'B'; hdr[1] = 'M';
+                std::memcpy(hdr + 2, &file_size, 4);
+                const uint32_t off = 54; std::memcpy(hdr + 10, &off, 4);
+                const uint32_t dib = 40; std::memcpy(hdr + 14, &dib, 4);
+                const int32_t ww = static_cast<int32_t>(w); std::memcpy(hdr + 18, &ww, 4);
+                const int32_t hh = -static_cast<int32_t>(h); std::memcpy(hdr + 22, &hh, 4);
+                const uint16_t planes = 1; std::memcpy(hdr + 26, &planes, 2);
+                const uint16_t bpp = 32; std::memcpy(hdr + 28, &bpp, 2);
+                std::fwrite(hdr, 1, 54, f);
+                std::vector<uint8_t> row(row_bytes);
+                for (uint32_t y = 0; y < h; ++y) {
+                    const uint8_t* src =
+                        static_cast<const uint8_t*>(mapped.pData) +
+                        static_cast<size_t>(y) * mapped.RowPitch;
+                    for (uint32_t x = 0; x < w; ++x) {  // RGBA -> BGRA
+                        row[x * 4 + 0] = src[x * 4 + 2];
+                        row[x * 4 + 1] = src[x * 4 + 1];
+                        row[x * 4 + 2] = src[x * 4 + 0];
+                        row[x * 4 + 3] = 255;
+                    }
+                    std::fwrite(row.data(), 1, row_bytes, f);
+                }
+                std::fclose(f);
+            }
+            g_context->Unmap(staging, 0);
+        }
+        staging->Release();
+    }
+    back->Release();
+}
+
 // --------------------------------------------------------------------- State
 cs::VolumeTree            g_tree;
 std::vector<std::wstring> g_volumes;
@@ -115,6 +173,7 @@ std::wstring              g_error;
 std::vector<uint32_t>     g_otherNodes;
 bool                      g_openOtherPopup = false;
 bool                      g_volumeAccessible = true;
+std::wstring              g_capturePath;  // dev: COMPUTE_SPACE_CAPTURE
 
 LRESULT WINAPI wnd_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam)) return true;
@@ -488,6 +547,11 @@ int run() {
 
     std::wstring devDir;
     if (dev_recursive_dir(devDir)) start_scan();  // auto-start for dev smoke tests
+    {
+        wchar_t cap[1024] = {};
+        if (GetEnvironmentVariableW(L"COMPUTE_SPACE_CAPTURE", cap, 1024) > 0)
+            g_capturePath = cap;
+    }
 
     unsigned long long frame = 0;
     bool done = false;
@@ -526,6 +590,12 @@ int run() {
         g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
         g_context->ClearRenderTargetView(g_rtv, clear);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
+        if (!g_capturePath.empty() && frame == 120) {
+            save_backbuffer_bmp(g_capturePath);
+            dbg("captured back buffer");
+            done = true;
+        }
 
         const HRESULT hr = g_swapChain->Present(1, 0);  // vsync
         g_swapOccluded = (hr == DXGI_STATUS_OCCLUDED);
