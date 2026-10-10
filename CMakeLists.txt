@@ -23,7 +23,7 @@ else()
 endif()
 add_compile_definitions(UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 
-# ---- core (no UI dependencies) ----
+# ---- core library (no UI dependencies) ----
 add_library(compute_core STATIC
     src/core/ntfs.cpp
     src/core/tree.cpp
@@ -32,6 +32,39 @@ add_library(compute_core STATIC
     src/core/recursive_scanner.cpp
 )
 target_include_directories(compute_core PUBLIC include)
+
+# ---- Dear ImGui (pinned git submodule) ----
+add_library(imgui STATIC
+    third_party/imgui/imgui.cpp
+    third_party/imgui/imgui_draw.cpp
+    third_party/imgui/imgui_tables.cpp
+    third_party/imgui/imgui_widgets.cpp
+    third_party/imgui/backends/imgui_impl_win32.cpp
+    third_party/imgui/backends/imgui_impl_dx11.cpp
+)
+target_include_directories(imgui PUBLIC third_party/imgui third_party/imgui/backends)
+if(MSVC)
+    target_compile_options(imgui PRIVATE /W0)
+else()
+    target_compile_options(imgui PRIVATE -w)
+endif()
+
+# ---- GUI application ----
+add_executable(compute_space_v2 WIN32
+    src/main.cpp
+    src/gui/app.cpp
+    src/gui/treemap_view.cpp
+)
+target_include_directories(compute_space_v2 PRIVATE include src)
+target_link_libraries(compute_space_v2 PRIVATE compute_core imgui
+    d3d11 dxgi d3dcompiler dwmapi)
+
+# Request administrator (MFT direct read needs to open the volume).
+# Turn this off only to run automated GUI smoke tests without a UAC prompt.
+option(COMPUTE_SPACE_NO_ADMIN_MANIFEST "Build the GUI without the requireAdministrator manifest" OFF)
+if(MSVC AND NOT COMPUTE_SPACE_NO_ADMIN_MANIFEST)
+    target_link_options(compute_space_v2 PRIVATE "/MANIFESTUAC:level='requireAdministrator'")
+endif()
 
 # ---- tests ----
 include(CTest)

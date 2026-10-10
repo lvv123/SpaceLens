@@ -1,37 +1,73 @@
 # AGENTS.md
 
-C++20 project built with CMake. No third-party dependencies yet.
+Windows-only C++20 desktop app that analyzes disk usage by reading the NTFS
+`$MFT` directly and visualizes it as a treemap. Spec: `需求文档.md`.
+
+## Prerequisites
+
+The GUI needs Dear ImGui, which is a **git submodule** pinned to a release tag:
+
+```sh
+git submodule update --init --recursive
+```
+
+If the clone is blocked on this network, set a proxy first
+(`$env:HTTP_PROXY` / `$env:HTTPS_PROXY`, e.g. `http://127.0.0.1:7890`).
 
 ## Build & test
 
-```sh
-cmake -S . -B build           # configure
-cmake --build build           # build
-```
-
-Tests are **off by default** and only exist when configured with `-DBUILD_TESTING=ON`:
+Default CMake generator here is **Visual Studio 2022** (multi-config), so pass
+`--config`. Default build type is **Release** (performance first).
 
 ```sh
 cmake -S . -B build -DBUILD_TESTING=ON
-cmake --build build
-ctest --test-dir build --output-on-failure
+cmake --build build --config Release
+ctest --test-dir build -C Release --output-on-failure
 ```
 
-There is no test framework; `tests/unit_tests.cpp` is a hand-rolled runner that returns non-zero on failure.
+- Executable: `build/bin/Release/compute_space_v2.exe` (multi-config adds the
+  config subdir; single-config generators put it directly in `build/bin`).
+- Tests are **off unless** `-DBUILD_TESTING=ON`. There is no framework:
+  `tests/unit_tests.cpp` is a hand-rolled runner returning non-zero on failure.
+- MinGW GCC 15 is also installed (`-G "MinGW Makefiles"`), but the GUI assumes
+  MSVC/DX11 and the admin manifest is MSVC-only.
 
-## Toolchain notes (Windows)
+## Layout
 
-- Default CMake generator is **Visual Studio 2022 (MSVC)**, a multi-config generator. Pass `--config Debug` (or Release) to `cmake --build`, and `-C Debug` to `ctest`. The executable is then at `build/bin/<Config>/`.
-- MinGW GCC 15 is also installed. To use it: `cmake -S . -B build -G "MinGW Makefiles"`; single-config output is `build/bin/`.
-- `CMAKE_RUNTIME_OUTPUT_DIRECTORY` is set, so binaries always live under `build/bin/` — do not look in the source tree.
+- `include/` — public headers (`ntfs.hpp`, `tree.hpp`, `treemap.hpp`, `scan.hpp`,
+  `format.hpp`, `utf8.hpp`). Included as `"ntfs.hpp"` (include root is `include/`).
+- `src/core/` — `compute_core` static lib: MFT parsing, tree, treemap, scanners.
+  **No UI dependencies** so it stays unit-testable.
+- `src/gui/` — Win32 + DirectX 11 + ImGui app (`app.cpp`, `treemap_view.cpp`).
+- `tests/unit_tests.cpp` — core tests (synthetic NTFS records, treemap geometry,
+  recursive-scanner oracle on a temp dir).
+- `third_party/imgui` — ImGui submodule (do not edit; update the pin instead).
 
-## Conventions
+Sources are listed explicitly in `CMakeLists.txt` (no globbing) — add new files
+by hand to the right target.
 
-- Sources are added to `CMakeLists.txt` explicitly per target; there is no globbing. Add new files to the relevant target by hand.
-- Headers live in `include/`, implementations in `src/`, tests in `tests/`. Public headers are included as `"version.hpp"` (target include dir is `include/`).
-- Version string is defined in `include/version.hpp` and reflected in `CMakeLists.txt` (`project(... VERSION ...)`) — keep them in sync.
+## Running / privileges
 
-## Git
+- The app opens `\\.\X:` to read the MFT, which **requires administrator**. The
+  default build embeds a `requireAdministrator` manifest (UAC).
+- To run/test the GUI **without** elevation (e.g. automated smoke tests), build
+  with `-DCOMPUTE_SPACE_NO_ADMIN_MANIFEST=ON`; the MFT scan then fails cleanly
+  and the UI shows a "need admin" notice.
+- Dev shortcut: set `COMPUTE_SPACE_DEV_DIR=<dir>` to auto-start a
+  `scan_directory_recursive` scan of that directory instead of MFT. Only for
+  development without admin; never set in normal runs.
 
-- Repo-local identity is set to `Compute Space Dev <dev@compute-space.local>`; change it with `git config user.name/user.email` if needed.
-- `.gitattributes` normalizes line endings to LF (`* text=auto eol=lf`). `build/` and other build output are gitignored.
+## Core conventions / gotchas
+
+- Size is always `uint64_t`; never cast to `float`/`int` for storage.
+- Hard links: one `$FILE_NAME` attribute = one directory entry = one tree node
+  (the same MFT record can back several nodes). This matches Explorer.
+- Parent linking **validates the FRN sequence number** (high 16 bits) so recycled
+  MFT records are not attached to the wrong directory.
+- NTFS metadata records are `recordNumber < 16` except the root (record 5);
+  everything else (including `$Recycle.Bin`) is counted as a real file.
+- Always run `apply_fixups` before parsing a record or its `$DATA` run list.
+- `squarified_treemap` expects weights sorted descending; it scales them to the
+  bounds area internally.
+- The tree is an arena (`std::vector<Node>` + index/sibling links + a name pool),
+  not pointer-per-node — keep it that way for large volumes.

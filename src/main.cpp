@@ -1,6 +1,7 @@
-#include <iostream>
+#include <windows.h>
 
-int main() {
-    std::cout << "Compute Space v2\n";
-    return 0;
+#include "gui/app.hpp"
+
+int WINAPI wWinMain(HINSTANCE /*instance*/, HINSTANCE /*prev*/, PWSTR /*cmd*/, int /*show*/) {
+    return gui::run();
 }
