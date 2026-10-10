@@ -3,8 +3,11 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi.h>
+#include <shellapi.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -175,6 +178,12 @@ bool                      g_openOtherPopup = false;
 bool                      g_volumeAccessible = true;
 std::wstring              g_capturePath;  // dev: COMPUTE_SPACE_CAPTURE
 
+std::vector<uint32_t> g_childOrder;      // current folder's children, sorted/filtered
+int                   g_sortCol = 1;     // 0 = name, 1 = size, 2 = percent
+bool                  g_sortAscending = false;
+bool                  g_orderDirty = true;
+char                  g_filter[96] = "";
+
 LRESULT WINAPI wnd_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam)) return true;
     switch (msg) {
@@ -266,6 +275,7 @@ void poll_scan() {
         if (!g_progress.failed.load() && g_tree.nodeCount() > 0) {
             g_current = g_tree.root();
             g_path.assign(1, g_current);
+            g_orderDirty = true;
             const uint64_t rs = g_tree.node(g_current).totalSize;
             g_threshold = (rs > 1000) ? rs / 1000 : 1024;
             char buf[256];
@@ -288,13 +298,73 @@ void navigate_to(uint32_t node) {
     if (!g_tree.valid(node)) return;
     g_current = node;
     g_path.push_back(node);
+    g_orderDirty = true;
 }
 
 void navigate_up() {
     if (g_path.size() > 1) {
         g_path.pop_back();
         g_current = g_path.back();
+        g_orderDirty = true;
     }
+}
+
+std::string ascii_lower(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+// Full filesystem path of a node (root name is like "C:").
+std::wstring build_path(uint32_t node) {
+    std::vector<uint32_t> chain;
+    for (uint32_t n = node; n != cs::VolumeTree::kInvalid; n = g_tree.node(n).parent)
+        chain.push_back(n);
+    std::wstring path;
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+        const std::wstring name = g_tree.nameString(*it);
+        if (path.empty()) {
+            path = name;
+        } else {
+            if (path.back() != L'\\') path += L'\\';
+            path += name;
+        }
+    }
+    return path;
+}
+
+void open_in_explorer(uint32_t node) {
+    const std::wstring path = build_path(node);
+    const bool isDir = g_tree.isDirectory(node);
+    const std::wstring params = isDir ? (L"\"" + path + L"\"")
+                                      : (L"/select,\"" + path + L"\"");
+    ShellExecuteW(nullptr, L"open", L"explorer.exe", params.c_str(), nullptr, SW_SHOWNORMAL);
+}
+
+void sort_children_by_spec() {
+    std::sort(g_childOrder.begin(), g_childOrder.end(), [](uint32_t a, uint32_t b) {
+        bool less;
+        if (g_sortCol == 0)
+            less = g_tree.nameString(a) < g_tree.nameString(b);
+        else
+            less = g_tree.node(a).totalSize < g_tree.node(b).totalSize;
+        return g_sortAscending ? less : !less;
+    });
+}
+
+void refresh_children() {
+    g_childOrder.clear();
+    g_orderDirty = false;
+    if (!g_tree.valid(g_current)) return;
+    const std::string filter = ascii_lower(g_filter);
+    for (uint32_t c = g_tree.node(g_current).firstChild; c != cs::VolumeTree::kInvalid;
+         c = g_tree.node(c).nextSibling) {
+        if (!filter.empty()) {
+            const std::string nm = ascii_lower(cs::wide_to_utf8(g_tree.nameString(c)));
+            if (nm.find(filter) == std::string::npos) continue;
+        }
+        g_childOrder.push_back(c);
+    }
+    sort_children_by_spec();
 }
 
 void setup_style(float scale) {
@@ -466,6 +536,21 @@ void draw_treemap_panel(float width, float height) {
         ImGui::ProgressBar(frac, ImVec2(-1, 0), buf);
         ImGui::Text("已读取 %s", cs::human_size(g_progress.bytesRead.load()).c_str());
     } else if (g_current != cs::VolumeTree::kInvalid) {
+        const auto& cur = g_tree.node(g_current);
+        char meta[160];
+        std::snprintf(meta, sizeof(meta), "%llu 项 · 合计 %s",
+                      static_cast<unsigned long long>(cur.childCount),
+                      cs::human_size(cur.totalSize).c_str());
+        std::string cname = cs::wide_to_utf8(g_tree.nameString(g_current));
+        if (cname.empty()) cname = "（根）";
+        ImGui::Text("%s", cname.c_str());
+        const float mx = ImGui::GetWindowContentRegionMax().x - ImGui::CalcTextSize(meta).x;
+        if (mx > ImGui::GetCursorPosX() + 12.0f) {
+            ImGui::SameLine(mx);
+            ImGui::TextDisabled("%s", meta);
+        }
+        ImGui::Separator();
+
         const ImVec2 pos = ImGui::GetCursorScreenPos();
         const ImVec2 size = ImGui::GetContentRegionAvail();
         cs::Rect bounds{pos.x, pos.y, size.x, size.y};
@@ -488,6 +573,25 @@ void draw_treemap_panel(float width, float height) {
                                "未以管理员身份运行：MFT 直读需要管理员权限。");
     }
     ImGui::EndChild();
+}
+
+void header_cell(const char* label, int col) {
+    ImGui::TableSetColumnIndex(col);
+    const bool active = (g_sortCol == col);
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%s%s", label, active ? (g_sortAscending ? " ^" : " v") : "");
+    ImGui::PushStyleColor(ImGuiCol_Text, active ? ImVec4(0.75f, 0.85f, 1.0f, 1.0f)
+                                                 : ImVec4(0.62f, 0.66f, 0.74f, 1.0f));
+    if (ImGui::Selectable(buf, false, ImGuiSelectableFlags_None)) {
+        if (g_sortCol == col)
+            g_sortAscending = !g_sortAscending;
+        else {
+            g_sortCol = col;
+            g_sortAscending = (col == 0);
+        }
+        sort_children_by_spec();
+    }
+    ImGui::PopStyleColor();
 }
 
 void draw_list_panel(float width, float height) {
@@ -530,6 +634,11 @@ void draw_list_panel(float width, float height) {
         return;
     }
 
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::InputTextWithHint("##filter", "筛选名称…", g_filter, sizeof(g_filter)))
+        g_orderDirty = true;
+    if (g_orderDirty) refresh_children();
+
     const auto& cur = g_tree.node(g_current);
     const uint64_t total = cur.totalSize;
 
@@ -540,12 +649,14 @@ void draw_list_panel(float width, float height) {
         ImGui::TableSetupColumn("大小", ImGuiTableColumnFlags_WidthFixed, 104.0f);
         ImGui::TableSetupColumn("占比", ImGuiTableColumnFlags_WidthFixed, 76.0f);
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableHeadersRow();
+        ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
+        header_cell("名称", 0);
+        header_cell("大小", 1);
+        header_cell("占比", 2);
 
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const float cellPad = ImGui::GetStyle().CellPadding.y;
-        for (uint32_t c = cur.firstChild; c != cs::VolumeTree::kInvalid;
-             c = g_tree.node(c).nextSibling) {
+        for (uint32_t c : g_childOrder) {
             const auto& n = g_tree.node(c);
             const uint64_t sz = (g_basis == gui::SizeBasis::Logical) ? n.totalSize : n.totalAlloc;
             const double pct =
@@ -581,10 +692,24 @@ void draw_list_panel(float width, float height) {
             if (ImGui::IsItemClicked() && g_tree.isDirectory(c) && n.childCount > 0) navigate_to(c);
             ImGui::PopStyleColor(3);
 
+            if (ImGui::BeginPopupContextItem()) {
+                if (ImGui::MenuItem("在资源管理器中打开")) open_in_explorer(c);
+                const std::string path = cs::wide_to_utf8(build_path(c));
+                if (ImGui::MenuItem("复制路径")) ImGui::SetClipboardText(path.c_str());
+                if (ImGui::MenuItem("复制大小"))
+                    ImGui::SetClipboardText(cs::human_size(sz).c_str());
+                ImGui::EndPopup();
+            }
+
             ImGui::TableSetColumnIndex(1);
             ImGui::TextUnformatted(cs::human_size(sz).c_str());
             ImGui::TableSetColumnIndex(2);
             ImGui::Text("%.1f%%", pct);
+        }
+        if (g_childOrder.empty() && g_filter[0] != '\0') {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextDisabled("无匹配项");
         }
         ImGui::EndTable();
     }
@@ -609,10 +734,14 @@ void draw_status() {
         ImGui::TextDisabled("文件夹 %llu",
                             static_cast<unsigned long long>(g_progress.dirCount.load()));
         const uint64_t orphN = g_progress.orphanNodes.load();
-        if (orphN > 0) {
+        const uint64_t orphB = g_progress.orphanBytes.load();
+        if (orphN > 0 && orphB * 500u > total) {  // only when non-negligible (>0.2%)
             ImGui::SameLine(0, 16);
-            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "未连接 %llu",
-                               static_cast<unsigned long long>(orphN));
+            ImGui::TextDisabled("未连接 %llu",
+                                static_cast<unsigned long long>(orphN));
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("未能归入目录树的记录（约 %s）：MFT 解析的残留项",
+                                  cs::human_size(orphB).c_str());
         }
     } else {
         ImGui::TextDisabled("%zu 个 NTFS 卷，选择后点击“扫描”", g_volumes.size());

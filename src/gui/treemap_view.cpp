@@ -48,6 +48,21 @@ ImU32 brighten(ImU32 col, int d) {
     return IM_COL32(r, g, b, a);
 }
 
+// Truncate a UTF-8 string with an ellipsis so it fits within maxW pixels.
+std::string ellipsize(const std::string& s, float maxW) {
+    if (ImGui::CalcTextSize(s.c_str()).x <= maxW) return s;
+    std::string t = s;
+    while (!t.empty()) {
+        size_t i = t.size();
+        while (i > 0 && (static_cast<unsigned char>(t[i - 1]) & 0xC0) == 0x80) --i;
+        if (i > 0) --i;
+        t.erase(i);
+        const std::string cand = t + "…";
+        if (ImGui::CalcTextSize(cand.c_str()).x <= maxW) return cand;
+    }
+    return std::string();
+}
+
 void draw_level(DrawCtx& ctx, uint32_t parent, const cs::Rect& bounds, int depth) {
     const cs::VolumeTree& tree = *ctx.tree;
     if (!tree.valid(parent) || bounds.w <= 1.0f || bounds.h <= 1.0f) return;
@@ -104,12 +119,15 @@ void draw_level(DrawCtx& ctx, uint32_t parent, const cs::Rect& bounds, int depth
                 text = "其他 (" + std::to_string(otherNodes.size()) + ")";
             else
                 text = cs::wide_to_utf8(tree.nameString(items[i].node));
-            ctx.draw->PushClipRect(p0, p1, true);
-            ctx.draw->AddText(ImVec2(r.x + 5.0f, r.y + 4.0f), IM_COL32(0, 0, 0, 170),
-                              text.c_str());
-            ctx.draw->AddText(ImVec2(r.x + 4.0f, r.y + 3.0f), IM_COL32(245, 246, 250, 255),
-                              text.c_str());
-            ctx.draw->PopClipRect();
+            text = ellipsize(text, r.w - 9.0f);
+            if (!text.empty()) {
+                ctx.draw->PushClipRect(p0, p1, true);
+                ctx.draw->AddText(ImVec2(r.x + 5.0f, r.y + 4.0f), IM_COL32(0, 0, 0, 170),
+                                  text.c_str());
+                ctx.draw->AddText(ImVec2(r.x + 4.0f, r.y + 3.0f), IM_COL32(245, 246, 250, 255),
+                                  text.c_str());
+                ctx.draw->PopClipRect();
+            }
         }
 
         if (ctx.canHover && ctx.mouse.x >= r.x && ctx.mouse.x < r.x + r.w &&

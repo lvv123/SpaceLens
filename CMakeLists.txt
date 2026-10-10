@@ -57,7 +57,7 @@ add_executable(compute_space_v2 WIN32
 )
 target_include_directories(compute_space_v2 PRIVATE include src)
 target_link_libraries(compute_space_v2 PRIVATE compute_core imgui
-    d3d11 dxgi d3dcompiler dwmapi)
+    d3d11 dxgi d3dcompiler dwmapi shell32)
 
 # Request administrator (MFT direct read needs to open the volume).
 # Turn this off only to run automated GUI smoke tests without a UAC prompt.
