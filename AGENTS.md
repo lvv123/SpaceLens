@@ -83,6 +83,14 @@ by hand to the right target.
   `0x28`/`0x30`; resident: content length), falling back to `$FILE_NAME`
   (`0x28`/`0x30`). `$STANDARD_INFORMATION` has **no** size fields — do not read
   sizes from it.
+- Large/fragmented files keep their `$DATA` in an extension record listed by
+  `$ATTRIBUTE_LIST` (which itself may be resident **or non-resident**); the base
+  record then has no `$DATA` and its `$FILE_NAME` size is **0**. Follow the list
+  to the lowest-VCN `$DATA` extent (see `sizeFollow*` diagnostics). `$FILE_NAME`
+  is not a safe fallback there.
+- `$FILE_NAME` names can be namespace 0 (POSIX) or 2 (DOS), not only Win32 (1/3).
+  Dropping non-Win32 names orphaned whole subtrees on a real volume. Select one
+  name per parent **record number**, preferring Win32 namespaces.
 - `squarified_treemap` expects weights sorted descending; it scales them to the
   bounds area internally.
 - The tree is an arena (`std::vector<Node>` + index/sibling links + a name pool),
