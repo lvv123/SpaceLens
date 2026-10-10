@@ -142,12 +142,60 @@ bool scan_mft(VolumeReader& reader, const std::wstring& volumeRoot, VolumeTree& 
     std::vector<uint64_t> parentRef;
     parentRef.reserve(static_cast<size_t>(recordCount));
 
-    uint32_t rootNode = VolumeTree::kInvalid;
+    uint64_t rootNode = VolumeTree::kInvalid;
     uint32_t recIndex = 0;
     uint64_t recordsProcessed = 0;
+    uint64_t sizeFollowAttempts = 0;
+    uint64_t sizeFollowSuccess = 0;
     bool cancelled = false;
 
     ntfs::FileRecord fr;
+    ntfs::FileRecord frExt;
+    std::vector<uint8_t> attrListBuf;
+
+    // Map an MFT record number to its bytes via the $MFT run list (used to
+    // follow $ATTRIBUTE_LIST references into extension records).
+    auto read_record = [&](uint64_t recordNumber, uint8_t* buf) -> bool {
+        const uint64_t streamOffset = recordNumber * recSize;
+        for (const auto& run : runs) {
+            const uint64_t runStart = run.vcn * bs.bytesPerCluster;
+            const uint64_t runBytes = run.lengthClusters * bs.bytesPerCluster;
+            if (streamOffset < runStart || streamOffset >= runStart + runBytes) continue;
+            if (run.sparse) return false;
+            const uint64_t phys = run.lcn * bs.bytesPerCluster + (streamOffset - runStart);
+            return reader.read(phys, buf, recSize);
+        }
+        return false;
+    };
+
+    // Read up to `maxBytes` of a stream described by `streamRuns` into `out`.
+    auto read_stream = [&](const std::vector<ntfs::Run>& streamRuns, uint64_t maxBytes,
+                           std::vector<uint8_t>& out) -> bool {
+        out.clear();
+        for (const auto& run : streamRuns) {
+            const uint64_t runBytes = run.lengthClusters * bs.bytesPerCluster;
+            uint64_t off = run.lcn * bs.bytesPerCluster;
+            uint64_t left = runBytes;
+            while (left > 0 && out.size() < maxBytes) {
+                const size_t n =
+                    static_cast<size_t>(std::min<uint64_t>(left, maxBytes - out.size()));
+                const size_t old = out.size();
+                out.resize(old + n);
+                if (run.sparse) {
+                    std::memset(out.data() + old, 0, n);
+                } else if (!reader.read(off, out.data() + old, static_cast<uint32_t>(n))) {
+                    return false;
+                }
+                off += n;
+                left -= n;
+            }
+            if (out.size() >= maxBytes) break;
+        }
+        return true;
+    };
+
+    std::vector<uint8_t> recStatus(static_cast<size_t>(recordCount), 0);  // 1=inUse 2=dir 4=hasNode
+    uint64_t cNotInUse = 0, cMetadata = 0, cNoName = 0, cFixupFail = 0, cParseFail = 0;
 
     auto handleRecord = [&](uint8_t* rec) {
         const uint32_t idx = recIndex++;
@@ -157,10 +205,13 @@ bool scan_mft(VolumeReader& reader, const std::wstring& volumeRoot, VolumeTree& 
             cancelled = true;
             return;
         }
-        if (!ntfs::apply_fixups(rec, recSize, bs.bytesPerSector)) return;
-        if (!ntfs::parse_file_record(rec, recSize, idx, bs.bytesPerSector, fr)) return;
-        if (!fr.inUse) return;
-        if (idx < 16 && idx != 5) return;  // NTFS metadata records
+        if (!ntfs::apply_fixups(rec, recSize, bs.bytesPerSector)) { ++cFixupFail; return; }
+        if (!ntfs::parse_file_record(rec, recSize, idx, bs.bytesPerSector, fr)) { ++cParseFail; return; }
+        if (!fr.inUse) { ++cNotInUse; return; }
+        if (idx < 16 && idx != 5) { ++cMetadata; return; }  // NTFS metadata records
+
+        recStatus[idx] |= 0x01;
+        if (fr.isDirectory) recStatus[idx] |= 0x02;
 
         if (idx == 5) {
             rootNode = tree.addNode(volumeRoot.c_str(),
@@ -168,20 +219,96 @@ bool scan_mft(VolumeReader& reader, const std::wstring& volumeRoot, VolumeTree& 
             parentRef.push_back(0);
             dirNode[5] = rootNode;
             recSeq[5] = fr.sequence;
+            recStatus[5] |= 0x04;
             return;
         }
 
-        const uint64_t selfSize = fr.isDirectory ? 0 : fr.realSize;
-        const uint64_t selfAlloc = fr.isDirectory ? 0 : fr.allocatedSize;
-        for (const auto& e : fr.names) {
-            if (e.nameSpace != 1 && e.nameSpace != 3) continue;  // Win32 / Win32&DOS only
+        uint64_t selfSize = fr.isDirectory ? 0 : fr.realSize;
+        uint64_t selfAlloc = fr.isDirectory ? 0 : fr.allocatedSize;
+
+        // Large/fragmented files keep their $DATA in an extension record listed
+        // by $ATTRIBUTE_LIST; the base record's size fields are 0. Follow it.
+        if (!fr.isDirectory && selfSize == 0) {
+            uint64_t dataRef = 0;
+            bool haveRef = fr.dataExtentRefValid;
+            if (haveRef) {
+                dataRef = fr.dataExtentRef;
+            } else if (fr.hasAttrListRuns) {
+                const uint64_t want = std::min<uint64_t>(fr.attrListRealSize, 256u * 1024u);
+                if (read_stream(fr.attrListRuns, want, attrListBuf) && !attrListBuf.empty()) {
+                    uint64_t ref = 0;
+                    if (ntfs::find_data_extent_in_attribute_list(
+                            attrListBuf.data(), static_cast<uint32_t>(attrListBuf.size()), ref)) {
+                        dataRef = ref;
+                        haveRef = true;
+                    }
+                }
+            }
+            if (haveRef) {
+                const uint64_t refRec = dataRef & 0xFFFFFFFFFFFFull;
+                if (refRec != idx && refRec < recordCount) {
+                    ++sizeFollowAttempts;
+                    uint8_t extBuf[4096];
+                    if (read_record(refRec, extBuf) &&
+                        ntfs::apply_fixups(extBuf, recSize, bs.bytesPerSector) &&
+                        ntfs::parse_file_record(extBuf, recSize, static_cast<uint32_t>(refRec),
+                                                bs.bytesPerSector, frExt) &&
+                        frExt.realSize != 0) {
+                        selfSize = frExt.realSize;
+                        selfAlloc = frExt.allocatedSize;
+                        ++sizeFollowSuccess;
+                    }
+                }
+            }
+        }
+
+        // Pick one name per parent directory (hard links -> several parents),
+        // preferring Win32 namespaces but falling back to POSIX/DOS names so
+        // entries created by POSIX-semantics tooling are not dropped.
+        // Pick one name per parent *record* (hard links -> several parents).
+        // Names for the same parent may differ only in the sequence bits, so key
+        // on the record number, not the full reference.
+        uint64_t chosenKey[32];
+        size_t chosenIdx[32];
+        uint8_t chosenRank[32];
+        size_t chosenCount = 0;
+        for (size_t a = 0; a < fr.names.size(); ++a) {
+            const auto& e = fr.names[a];
+            if (e.nameLength == 0) continue;
+            const uint64_t key = e.parentRef & 0xFFFFFFFFFFFFull;
+            const uint8_t rank = (e.nameSpace == 1 || e.nameSpace == 3) ? 0 : 1;
+            size_t slot = chosenCount;
+            for (size_t k = 0; k < chosenCount; ++k) {
+                if (chosenKey[k] == key) { slot = k; break; }
+            }
+            if (slot == chosenCount) {
+                if (chosenCount >= 32) continue;  // pathological number of names
+                chosenKey[chosenCount] = key;
+                chosenIdx[chosenCount] = a;
+                chosenRank[chosenCount] = rank;
+                ++chosenCount;
+            } else if (rank < chosenRank[slot]) {
+                chosenIdx[slot] = a;
+                chosenRank[slot] = rank;
+            }
+        }
+
+        bool created = false;
+        for (size_t k = 0; k < chosenCount; ++k) {
+            const auto& e = fr.names[chosenIdx[k]];
             const uint32_t node = tree.addNode(e.name, e.nameLength, selfSize, selfAlloc,
                                                fr.isDirectory, idx);
             parentRef.push_back(e.parentRef);
+            created = true;
             if (fr.isDirectory && dirNode[idx] == VolumeTree::kInvalid) {
                 dirNode[idx] = node;
                 recSeq[idx] = fr.sequence;
             }
+        }
+        if (created) {
+            recStatus[idx] |= 0x04;
+        } else {
+            ++cNoName;
         }
     };
 
@@ -247,6 +374,7 @@ bool scan_mft(VolumeReader& reader, const std::wstring& volumeRoot, VolumeTree& 
     // records cannot be attached to the wrong directory.
     uint64_t orphanNoParent = 0;
     uint64_t orphanSeqMismatch = 0;
+    uint64_t opOutOfRange = 0, opNotInUse = 0, opNotDir = 0, opNoNode = 0;
     for (uint32_t i = 0; i < tree.nodeCount(); ++i) {
         if (i == rootNode) continue;
         const uint64_t pref = parentRef[i];
@@ -254,13 +382,14 @@ bool scan_mft(VolumeReader& reader, const std::wstring& volumeRoot, VolumeTree& 
         const uint16_t pseq = static_cast<uint16_t>(pref >> 48);
         if (prec >= recordCount || prec == i) {
             ++orphanNoParent;
+            ++opOutOfRange;
             continue;
         }
+        const uint8_t st = recStatus[prec];
+        if ((st & 0x01) == 0) { ++orphanNoParent; ++opNotInUse; continue; }
+        if ((st & 0x02) == 0) { ++orphanNoParent; ++opNotDir; continue; }
         const uint32_t pnode = dirNode[prec];
-        if (pnode == VolumeTree::kInvalid) {
-            ++orphanNoParent;
-            continue;
-        }
+        if (pnode == VolumeTree::kInvalid) { ++orphanNoParent; ++opNoNode; continue; }
         if (recSeq[prec] != pseq) {
             ++orphanSeqMismatch;
             continue;
@@ -269,6 +398,17 @@ bool scan_mft(VolumeReader& reader, const std::wstring& volumeRoot, VolumeTree& 
     }
     progress.orphanNoParent.store(orphanNoParent, std::memory_order_relaxed);
     progress.orphanSeqMismatch.store(orphanSeqMismatch, std::memory_order_relaxed);
+    progress.orphanParentOutOfRange.store(opOutOfRange, std::memory_order_relaxed);
+    progress.orphanParentNotInUse.store(opNotInUse, std::memory_order_relaxed);
+    progress.orphanParentNotDir.store(opNotDir, std::memory_order_relaxed);
+    progress.orphanParentNoNode.store(opNoNode, std::memory_order_relaxed);
+    progress.recordsNotInUse.store(cNotInUse, std::memory_order_relaxed);
+    progress.recordsMetadata.store(cMetadata, std::memory_order_relaxed);
+    progress.recordsNoName.store(cNoName, std::memory_order_relaxed);
+    progress.recordsFixupFail.store(cFixupFail, std::memory_order_relaxed);
+    progress.recordsParseFail.store(cParseFail, std::memory_order_relaxed);
+    progress.sizeFollowAttempts.store(sizeFollowAttempts, std::memory_order_relaxed);
+    progress.sizeFollowSuccess.store(sizeFollowSuccess, std::memory_order_relaxed);
 
     // Diagnostics: how many nodes exist and how many could not be linked.
     // (totalSize still holds each node's own size here; aggregate() runs next.)

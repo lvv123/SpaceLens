@@ -43,6 +43,29 @@ struct AttrIterator {
 
 }  // namespace
 
+bool find_data_extent_in_attribute_list(const uint8_t* data, uint32_t length, uint64_t& ref) {
+    bool found = false;
+    uint64_t bestVcn = 0;
+    uint64_t bestRef = 0;
+    size_t p = 0;
+    while (p + 26 <= length) {
+        const uint32_t t = rd32(data + p);
+        const uint16_t elen = rd16(data + p + 4);
+        if (elen < 26 || p + elen > length) break;
+        const uint8_t nlen = data[p + 6];
+        const uint64_t vcn = rd64(data + p + 8);
+        const uint64_t r = rd64(data + p + 16);
+        if (t == kAttrData && nlen == 0 && (!found || vcn < bestVcn)) {
+            bestVcn = vcn;
+            bestRef = r;
+            found = true;
+        }
+        p += elen;
+    }
+    ref = bestRef;
+    return found;
+}
+
 bool parse_boot_sector(const uint8_t* data, size_t size, BootSector& out) {
     out = BootSector{};
     if (size < 72) return false;
@@ -148,6 +171,11 @@ bool parse_file_record(const uint8_t* record, size_t recordSize,
     out.realSize = 0;
     out.allocatedSize = 0;
     out.hasStandardInformation = false;
+    out.dataExtentRef = 0;
+    out.dataExtentRefValid = false;
+    out.attrListRuns.clear();
+    out.hasAttrListRuns = false;
+    out.attrListRealSize = 0;
     out.names.clear();
 
     if (recordSize < 48) return false;
@@ -161,10 +189,13 @@ bool parse_file_record(const uint8_t* record, size_t recordSize,
 
     uint64_t dataReal = 0;
     uint64_t dataAlloc = 0;
+    uint64_t dataBestVcn = 0;
     bool hasData = false;
     uint64_t fnReal = 0;
     uint64_t fnAlloc = 0;
     bool hasFileNameSize = false;
+    uint64_t attrListDataRef = 0;
+    bool attrListFound = false;
 
     AttrIterator it(record, recordSize);
     const uint8_t* attr = nullptr;
@@ -197,17 +228,38 @@ bool parse_file_record(const uint8_t* record, size_t recordSize,
                     }
                 }
             }
-        } else if (type == kAttrData && attrNameLen == 0 && !hasData) {
-            // The unnamed $DATA stream is the authoritative size source.
-            if (nonResident) {
-                dataAlloc = rd64(attr + 0x28);
-                dataReal  = rd64(attr + 0x30);
+        } else if (type == kAttrAttributeList) {
+            if (!nonResident) {
+                const uint32_t contentLen = rd32(attr + 16);
+                const uint16_t contentOff = rd16(attr + 20);
+                if (static_cast<uint32_t>(contentOff) + contentLen <= length) {
+                    attrListFound = find_data_extent_in_attribute_list(attr + contentOff,
+                                                                       contentLen, attrListDataRef);
+                }
             } else {
-                dataReal = dataAlloc = rd32(attr + 16);
+                const uint16_t runOff = rd16(attr + 32);
+                if (runOff < length) {
+                    decode_run_list(attr + runOff, length - runOff, out.attrListRuns);
+                    out.attrListRealSize = rd64(attr + 48);
+                    out.hasAttrListRuns = !out.attrListRuns.empty();
+                }
             }
-            hasData = true;
+        } else if (type == kAttrData && attrNameLen == 0) {
+            // The unnamed $DATA stream is the authoritative size source. When the
+            // attribute is split, keep the extent with the lowest VCN (its header
+            // carries the real size).
+            const uint64_t vcn = nonResident ? rd64(attr + 0x10) : 0;
+            if (!hasData || vcn < dataBestVcn) {
+                dataBestVcn = vcn;
+                dataAlloc = nonResident ? rd64(attr + 0x28) : rd32(attr + 16);
+                dataReal  = nonResident ? rd64(attr + 0x30) : rd32(attr + 16);
+                hasData = true;
+            }
         }
     }
+
+    out.dataExtentRef = attrListDataRef;
+    out.dataExtentRefValid = attrListFound;
 
     if (hasData) {
         out.realSize = dataReal;

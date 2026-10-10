@@ -151,6 +151,10 @@ struct NameSpec {
 struct RecSpec {
     bool present = false;
     bool isDir = false;
+    bool extData = false;        // holds an unnamed $DATA extent (extension record)
+    bool hasAttrList = false;    // base record points to dataExtRecord via $ATTRIBUTE_LIST
+    bool nonResidentAttrList = false;  // $ATTRIBUTE_LIST content stored in a run
+    uint16_t dataExtRecord = 0;
     uint16_t seq = 0;
     uint64_t size = 0;
     std::vector<NameSpec> names;
@@ -165,7 +169,13 @@ std::vector<uint8_t> build_volume(const std::vector<RecSpec>& specs) {
     const uint64_t numRecords = specs.size();
     const uint64_t mftReal = numRecords * kRecSize;
     const uint32_t mftClusters = static_cast<uint32_t>((mftReal + kCluster - 1) / kCluster);
-    std::vector<uint8_t> img(static_cast<size_t>(kMftDataOffset + mftClusters * kCluster), 0);
+    bool needList = false;
+    for (const auto& sp : specs)
+        if (sp.nonResidentAttrList) needList = true;
+    const uint32_t listCluster = needList ? (2 + mftClusters) : 0;
+    const size_t imgSize = static_cast<size_t>(kMftDataOffset + mftClusters * kCluster) +
+                           (needList ? kCluster : 0);
+    std::vector<uint8_t> img(imgSize, 0);
 
     // Boot sector.
     std::memcpy(img.data() + 3, "NTFS    ", 8);
@@ -220,15 +230,50 @@ std::vector<uint8_t> build_volume(const std::vector<RecSpec>& specs) {
             std::memset(si, 0, sizeof(si));
             put32(si + 0x20, 0x20);  // FILE_ATTRIBUTE_ARCHIVE
             pos = add_resident(rec, pos, 0x10, si, sizeof(si));
-            if (s.size > 0) pos = add_nonresident(rec, pos, s.size, s.size);
+            if (s.extData) {
+                pos = add_nonresident(rec, pos, s.size, s.size);
+            } else if (s.hasAttrList) {
+                // $ATTRIBUTE_LIST with one unnamed $DATA entry -> dataExtRecord.
+                uint8_t al[26];
+                std::memset(al, 0, sizeof(al));
+                put32(al + 0, 0x80);
+                put16(al + 4, 26);
+                put64(al + 8, 0);  // lowest VCN
+                put64(al + 16, (static_cast<uint64_t>(s.dataExtRecord) << 48) | s.dataExtRecord);
+                pos = add_resident(rec, pos, 0x20, al, sizeof(al));
+            } else if (s.nonResidentAttrList) {
+                // Non-resident $ATTRIBUTE_LIST; its content lives in a run at
+                // listCluster and points to dataExtRecord.
+                const size_t runOff = 64;
+                uint32_t alen = static_cast<uint32_t>((runOff + 4 + 7) & ~7u);
+                put32(rec + pos + 0, 0x20);
+                put32(rec + pos + 4, alen);
+                rec[pos + 8] = 1;  // non-resident
+                rec[pos + 9] = 0;
+                put16(rec + pos + 32, static_cast<uint16_t>(runOff));
+                put64(rec + pos + 40, 26);  // allocated
+                put64(rec + pos + 48, 26);  // real
+                const uint8_t run[4] = {0x11, 0x01, static_cast<uint8_t>(listCluster), 0x00};
+                std::memcpy(rec + pos + runOff, run, sizeof(run));
+                pos += alen;
+                uint8_t* dst = img.data() + static_cast<uint64_t>(listCluster) * kCluster;
+                std::memset(dst, 0, 26);
+                put32(dst + 0, 0x80);
+                put16(dst + 4, 26);
+                put64(dst + 8, 0);
+                put64(dst + 16, (static_cast<uint64_t>(s.dataExtRecord) << 48) | s.dataExtRecord);
+            } else if (s.size > 0) {
+                pos = add_nonresident(rec, pos, s.size, s.size);
+            }
         }
         for (const auto& nm : s.names) {
             std::vector<uint8_t> content(0x42 + nm.name.size() * 2, 0);
             const uint64_t pref =
                 (static_cast<uint64_t>(nm.parentSeq) << 48) | nm.parent;
             put64(content.data() + 0, pref);
-            put64(content.data() + 0x28, s.isDir ? 0 : s.size);
-            put64(content.data() + 0x30, s.isDir ? 0 : s.size);
+            const uint64_t fnSize = (s.isDir || s.hasAttrList) ? 0 : s.size;
+            put64(content.data() + 0x28, fnSize);
+            put64(content.data() + 0x30, fnSize);
             content[0x40] = static_cast<uint8_t>(nm.name.size());
             content[0x41] = nm.nameSpace;
             if (nm.dirFlag) put32(content.data() + 0x38, 0x10000000);
@@ -268,7 +313,7 @@ uint32_t find_child(const cs::VolumeTree& t, uint32_t parent, const std::wstring
 
 // A catalog matching build_volume()'s expected contents.
 std::vector<RecSpec> sample_volume_spec(bool corrupt_b_sequence) {
-    std::vector<RecSpec> s(21);
+    std::vector<RecSpec> s(35);
     s[0].present = true;  // $MFT (metadata, must be ignored)
     s[0].seq = 0;
     s[0].names.push_back({5, 5, L"$MFT", 1, false});
@@ -304,6 +349,51 @@ std::vector<RecSpec> sample_volume_spec(bool corrupt_b_sequence) {
     s[20].seq = 20;
     s[20].size = 700;                       // dangling parent -> skipped
     s[20].names.push_back({99, 99, L"orphan.bin", 1, false});
+
+    // POSIX-namespace-only entries must still be counted (regression: filtering
+    // them out dropped whole subtrees).
+    s[21].present = true;
+    s[21].isDir = true;
+    s[21].seq = 21;
+    s[21].names.push_back({5, 5, L"posixdir", 0, true});
+
+    s[22].present = true;
+    s[22].seq = 22;
+    s[22].size = 900;
+    s[22].names.push_back({21, 21, L"p.dat", 0, false});
+
+    // Large file whose $DATA lives in an extension record; base $FILE_NAME
+    // size is 0 (regression: must follow $ATTRIBUTE_LIST).
+    s[30].present = true;
+    s[30].seq = 30;
+    s[30].hasAttrList = true;
+    s[30].dataExtRecord = 31;
+    s[30].names.push_back({5, 5, L"big.bin", 1, false});
+
+    s[31].present = true;
+    s[31].extData = true;
+    s[31].seq = 31;
+    s[31].size = 1234567;  // 1.23 MB stored in the extension record
+
+    // File whose non-resident $ATTRIBUTE_LIST points to the $DATA extent.
+    s[32].present = true;
+    s[32].seq = 32;
+    s[32].nonResidentAttrList = true;
+    s[32].dataExtRecord = 33;
+    s[32].names.push_back({5, 5, L"nonres.bin", 1, false});
+
+    s[33].present = true;
+    s[33].extData = true;
+    s[33].seq = 33;
+    s[33].size = 222222;
+
+    // Same file, two names for the same parent record but different sequence
+    // bits (Win32 + DOS). Must produce a single node.
+    s[34].present = true;
+    s[34].seq = 34;
+    s[34].size = 300;
+    s[34].names.push_back({5, 5, L"dup.bin", 1, false});
+    s[34].names.push_back({5, 6, L"DUP~1.BIN", 2, false});
     return s;
 }
 
@@ -577,22 +667,39 @@ void test_mft_scan_synthetic() {
     CHECK(error.empty());
     CHECK(progress.finished.load());
     CHECK(!progress.failed.load());
-    CHECK(progress.totalRecords.load() == 21);
+    CHECK(progress.totalRecords.load() == 35);
 
     const uint32_t root = tree.root();
     CHECK(root != cs::VolumeTree::kInvalid);
     CHECK(tree.isDirectory(root));
 
-    // root + docs + a.txt + b.bin + c.txt(root) + c.txt(docs) + orphan = 7
-    CHECK(tree.nodeCount() == 7);
-    CHECK(progress.fileCount.load() == 5);
-    CHECK(progress.dirCount.load() == 2);
+    // root + docs + a.txt + b.bin + c.txt(root) + c.txt(docs) + orphan
+    //      + posixdir + p.dat + big.bin + nonres.bin + dup.bin = 12
+    CHECK(tree.nodeCount() == 12);
+    CHECK(progress.fileCount.load() == 9);
+    CHECK(progress.dirCount.load() == 3);
     CHECK(progress.orphanNodes.load() == 1);   // orphan.bin (dangling parent)
     CHECK(progress.orphanBytes.load() == 700);
     CHECK(progress.orphanNoParent.load() == 1);
     CHECK(progress.orphanSeqMismatch.load() == 0);
-    // 2000 (b) + 500 (c@root) + 1500 (docs) = 4000; orphan is dangling -> excluded
-    CHECK(tree.node(root).totalSize == 4000);
+    // 2000 + 500 + 1500 + 900 + 1234567 + 222222 + 300 = 1461989
+    CHECK(tree.node(root).totalSize == 1461989);
+
+    // File whose $DATA is in an extension record (base $FILE_NAME size = 0).
+    CHECK(find_child(tree, root, L"big.bin") != cs::VolumeTree::kInvalid);
+    CHECK(tree.node(find_child(tree, root, L"big.bin")).totalSize == 1234567);
+    // Non-resident $ATTRIBUTE_LIST -> extension record size.
+    CHECK(find_child(tree, root, L"nonres.bin") != cs::VolumeTree::kInvalid);
+    CHECK(tree.node(find_child(tree, root, L"nonres.bin")).totalSize == 222222);
+    // Two names for one parent => one node, named with the Win32 name.
+    CHECK(find_child(tree, root, L"dup.bin") != cs::VolumeTree::kInvalid);
+    CHECK(find_child(tree, root, L"DUP~1.BIN") == cs::VolumeTree::kInvalid);
+
+    // POSIX-namespace-only directory and file are recovered.
+    const uint32_t posix = find_child(tree, root, L"posixdir");
+    CHECK(posix != cs::VolumeTree::kInvalid);
+    CHECK(tree.node(posix).totalSize == 900);
+    CHECK(find_child(tree, posix, L"p.dat") != cs::VolumeTree::kInvalid);
 
     const uint32_t docs = find_child(tree, root, L"docs");
     CHECK(docs != cs::VolumeTree::kInvalid);
@@ -606,8 +713,8 @@ void test_mft_scan_synthetic() {
     CHECK(tree.node(cb).recordIndex == 19);
     CHECK(tree.node(cc).recordIndex == 19);  // same MFT record, two entries
 
-    // Sorted descending: b.bin (2000) should be the first child of root.
-    CHECK(tree.nameString(tree.node(root).firstChild) == L"b.bin");
+    // Sorted descending: big.bin (1234567) should be the first child of root.
+    CHECK(tree.nameString(tree.node(root).firstChild) == L"big.bin");
 
     // Metadata ($MFT, record 0) must not appear.
     CHECK(find_child(tree, root, L"$MFT") == cs::VolumeTree::kInvalid);
@@ -622,8 +729,8 @@ void test_mft_sequence_check() {
     cs::ScanProgress progress;
     std::wstring error;
     CHECK(cs::scan_mft(reader, L"X:", tree, progress, error));
-    // b.bin's parent sequence does not match -> dropped: 500 + 1500 = 2000
-    CHECK(tree.node(tree.root()).totalSize == 2000);
+    // b.bin's parent sequence does not match -> dropped: 500+1500+900+1234567+222222+300
+    CHECK(tree.node(tree.root()).totalSize == 1459989);
     CHECK(find_child(tree, tree.root(), L"b.bin") == cs::VolumeTree::kInvalid);
     CHECK(progress.orphanSeqMismatch.load() == 1);
 }

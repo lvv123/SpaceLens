@@ -11,6 +11,7 @@
 namespace cs::ntfs {
 
 inline constexpr uint32_t kAttrStandardInformation = 0x10;
+inline constexpr uint32_t kAttrAttributeList       = 0x20;
 inline constexpr uint32_t kAttrFileName            = 0x30;
 inline constexpr uint32_t kAttrData                = 0x80;
 inline constexpr uint32_t kAttrEnd                 = 0xFFFFFFFF;
@@ -56,8 +57,21 @@ struct FileRecord {
     uint64_t realSize      = 0;      // logical size (unnamed $DATA; fallback $FILE_NAME)
     uint64_t allocatedSize = 0;      // size on disk (same sources)
     bool     hasStandardInformation = false;
+    // When a file's attributes are split (large/fragmented files), the unnamed
+    // $DATA lives in another record; this is that record's file reference.
+    uint64_t dataExtentRef = 0;
+    bool     dataExtentRefValid = false;
+    // A non-resident $ATTRIBUTE_LIST keeps its content in runs; the caller must
+    // read them to find the $DATA extent.
+    bool     hasAttrListRuns = false;
+    uint64_t attrListRealSize = 0;
+    std::vector<Run> attrListRuns;
     std::vector<FileNameEntry> names;  // reused across calls (capacity is kept)
 };
+
+// Find the unnamed $DATA entry with the lowest VCN in an $ATTRIBUTE_LIST and
+// return the file reference of the record that holds it.
+bool find_data_extent_in_attribute_list(const uint8_t* data, uint32_t length, uint64_t& ref);
 
 // Undo the update-sequence-array fixups in place. `record` must be mutable.
 bool apply_fixups(uint8_t* record, size_t recordSize, uint32_t bytesPerSector);

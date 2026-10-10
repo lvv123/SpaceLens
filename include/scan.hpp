@@ -23,6 +23,17 @@ struct ScanProgress {
     std::atomic<uint64_t> orphanBytes{0};   // their summed self size
     std::atomic<uint64_t> orphanNoParent{0};   // unlinked: parent record/dir not found
     std::atomic<uint64_t> orphanSeqMismatch{0};  // unlinked: parent sequence mismatch
+    std::atomic<uint64_t> orphanParentOutOfRange{0};
+    std::atomic<uint64_t> orphanParentNotInUse{0};
+    std::atomic<uint64_t> orphanParentNotDir{0};
+    std::atomic<uint64_t> orphanParentNoNode{0};
+    std::atomic<uint64_t> recordsNotInUse{0};
+    std::atomic<uint64_t> recordsMetadata{0};
+    std::atomic<uint64_t> recordsNoName{0};
+    std::atomic<uint64_t> recordsFixupFail{0};
+    std::atomic<uint64_t> recordsParseFail{0};
+    std::atomic<uint64_t> sizeFollowAttempts{0};
+    std::atomic<uint64_t> sizeFollowSuccess{0};
     std::atomic<bool>     cancel{false};
     std::atomic<bool>     finished{false};
     std::atomic<bool>     failed{false};
