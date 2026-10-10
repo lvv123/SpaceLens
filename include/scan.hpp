@@ -1,0 +1,40 @@
+#pragma once
+
+// Scanning entry points. `scan_volume_mft` is the fast path (admin + NTFS);
+// `scan_directory_recursive` is the portable path used for tests and for
+// non-elevated development.
+
+#include <atomic>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include "tree.hpp"
+
+namespace cs {
+
+struct ScanProgress {
+    std::atomic<uint64_t> recordsRead{0};
+    std::atomic<uint64_t> totalRecords{0};
+    std::atomic<uint64_t> bytesRead{0};
+    std::atomic<bool>     cancel{false};
+    std::atomic<bool>     finished{false};
+    std::atomic<bool>     failed{false};
+};
+
+// Drive roots of local NTFS volumes, e.g. {"C:", "D:"}.
+std::vector<std::wstring> list_ntfs_volumes();
+
+// Scan a whole NTFS volume by parsing $MFT directly. Requires an elevated
+// process. Returns false and sets `error` on failure.
+bool scan_volume_mft(const std::wstring& volumeRoot, VolumeTree& tree,
+                     ScanProgress& progress, std::wstring& error);
+
+// Recursively scan a directory with FindFirstFileW (no privileges needed).
+bool scan_directory_recursive(const std::wstring& path, VolumeTree& tree,
+                              ScanProgress& progress, std::wstring& error);
+
+// Format a Win32 error code as a readable message.
+std::wstring format_win32_error(uint32_t code);
+
+}  // namespace cs
