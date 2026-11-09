@@ -2,58 +2,59 @@
 
 # SpaceLens
 
-**A blazing-fast NTFS disk-usage analyzer for Windows — it reads `$MFT` directly instead of walking directories.**
+**Windows 上极速的 NTFS 磁盘空间分析工具 —— 直读 `$MFT`，不逐个文件遍历目录。**
 
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6?logo=windows&logoColor=white)](#requirements)
-[![Language](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)](#build)
-[![Build](https://img.shields.io/badge/build-CMake%20%2B%20MSVC-064F8C?logo=cmake&logoColor=white)](#build)
-[![UI](https://img.shields.io/badge/UI-Dear%20ImGui%20%2B%20DirectX%2011-1f6feb)](#build)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6?logo=windows&logoColor=white)](#-环境要求)
+[![Language](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)](#-构建)
+[![Build](https://img.shields.io/badge/build-CMake%20%2B%20MSVC-064F8C?logo=cmake&logoColor=white)](#-构建)
+[![UI](https://img.shields.io/badge/UI-Dear%20ImGui%20%2B%20DirectX%2011-1f6feb)](#-构建)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**English** · [简体中文](README.zh-CN.md)
+**简体中文** · [English](README.md)
 
-[Features](#-features) · [Screenshot](#-screenshot) · [Requirements](#-requirements) · [Build](#-build) · [Usage](#-usage) · [How it works](#-how-it-works)
+[功能](#-功能) · [截图](#-截图) · [环境要求](#-环境要求) · [构建](#-构建) · [使用](#-使用) · [实现原理](#-实现原理)
 
 </div>
 
-SpaceLens answers "what is eating my disk?" in seconds. Instead of recursing through
-directories with `FindFirstFile`, it opens the volume, parses the NTFS **Master File
-Table** (`$MFT`) and rebuilds the whole directory tree in one pass — the same trick
-WizTree uses. The result is shown as a size-sorted, drill-down folder list.
+SpaceLens 用几秒钟回答“我的磁盘被什么占满了”。它不递归调用 `FindFirstFile` 遍历目录，
+而是以管理员权限打开卷，直接解析 NTFS 的**主文件表**（`$MFT`），一次顺序读完整个卷的
+文件记录并重建目录树 —— 与 WizTree 相同的思路。结果以**按大小排序、可逐层下钻的列表**
+呈现。
 
 ---
 
-## ✨ Features
+## ✨ 功能
 
 | | |
 | --- | --- |
-| ⚡ **Whole-volume scan in seconds** | One sequential pass over the MFT with an 8 MB read buffer; no per-file syscalls. |
-| 📂 **Drill-down folder list** | Current folder's direct children, sorted by size with a share-of-parent bar. Click a row to descend, breadcrumb to jump back. |
-| 🔍 **Sort & filter** | Click headers to sort by name / size / share; filter the current level by name. |
-| 🎚️ **Size threshold** | Log-scale slider (1 KB – 10 GB) hides noise. Defaults to ~0.1 % of the root total; the status bar reports what was hidden. |
-| 💾 **Logical vs. on-disk size** | Every node keeps both; switch the metric from the toolbar. |
-| 🎨 **File-type colors** | Video / image / audio / document / archive / executable / code / other, with a legend. |
-| 🖱️ **Context menu** | Open in Explorer, copy path, copy size. |
-| 📊 **Live progress & cancel** | Scanning runs on a worker thread; the UI stays responsive and can cancel mid-scan. |
+| ⚡ **整卷秒级扫描** | 顺序读取 MFT（8 MB 缓冲区），不做逐文件系统调用。 |
+| 📂 **逐层下钻列表** | 展示当前文件夹的直接子项，按大小降序并带占父级比例条；点击行下钻，面包屑返回。 |
+| 🔍 **排序与筛选** | 点击表头按名称 / 大小 / 占比排序；按名称筛选当前层级。 |
+| 🎚️ **大小阈值** | 对数刻度滑杆（1 KB – 10 GB）过滤噪声，默认约为根目录总量的 0.1%，状态栏显示被过滤的数量与合计。 |
+| 💾 **逻辑大小 / 磁盘占用** | 每个节点同时保存两种口径，可在工具栏切换。 |
+| 🎨 **文件类型配色** | 视频 / 图片 / 音频 / 文档 / 压缩包 / 可执行 / 代码 / 其他，附图例。 |
+| 🖱️ **右键菜单** | 在资源管理器中打开、复制路径、复制大小。 |
+| 📊 **实时进度与取消** | 扫描在工作线程执行，UI 不卡顿，可随时取消。 |
 
-## 📸 Screenshot
+## 📸 截图
 
 <p align="center">
-  <img src="docs/screenshot.png" alt="SpaceLens main window" width="900">
+  <img src="docs/screenshot.png" alt="SpaceLens 主界面" width="900">
 </p>
 
-## 🧩 Requirements
+## 🧩 环境要求
 
 | | |
 | --- | --- |
-| OS | Windows 10 / 11, x64 |
-| Filesystem | **NTFS only** (non-NTFS volumes are rejected, no slow fallback) |
-| Privileges | **Administrator** — opening `\\.\X:` for MFT access requires elevation (the manifest requests it via UAC) |
-| Toolchain | Visual Studio 2022 (MSVC, C++20) — MinGW GCC 15 also builds, but the admin manifest is MSVC-only |
+| 操作系统 | Windows 10 / 11，x64 |
+| 文件系统 | **仅 NTFS**（非 NTFS 卷直接报错，不做慢速回退） |
+| 权限 | **管理员** —— 打开 `\\.\X:` 读取 MFT 必须提权（清单会触发 UAC） |
+| 工具链 | Visual Studio 2022（MSVC，C++20）；MinGW GCC 15 也能构建，但管理员清单仅支持 MSVC |
 
-Build-time dependency: [Dear ImGui](https://github.com/ocornut/imgui), vendored as a **git submodule** pinned to a release tag. DirectX 11 ships with Windows.
+构建期依赖：[Dear ImGui](https://github.com/ocornut/imgui)，以 **git submodule** 引入并锁定
+release tag。DirectX 11 随 Windows 提供。
 
-## 🔨 Build
+## 🔨 构建
 
 ```sh
 git submodule update --init --recursive
@@ -62,15 +63,14 @@ cmake -S . -B build
 cmake --build build --config Release
 ```
 
-The executable is `build/bin/Release/spacelens.exe` (single-config generators put it
-in `build/bin/`). Release is the default build type.
+产物为 `build/bin/Release/spacelens.exe`（单配置生成器输出到 `build/bin/`）。默认构建类型是
+Release。
 
-> **Portable output.** The CRT is linked statically
-> (`CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`), so `spacelens.exe` is a single
-> self-contained file — copy it to any Windows 10/11 x64 machine and run it. No
-> VC++ redistributable, no extra DLLs.
+> **单文件可分发。** CRT 采用静态链接（`CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`），
+> `spacelens.exe` 是自包含的单个文件 —— 拷到任意 Windows 10/11 x64 机器即可运行，
+> 无需 VC++ 运行库，也无需附带任何 DLL。
 
-### Tests
+### 测试
 
 ```sh
 cmake -S . -B build -DBUILD_TESTING=ON
@@ -78,74 +78,70 @@ cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-Tests are on by default `OFF`; they need no admin rights. `tests/unit_tests.cpp` is a
-small hand-written runner covering synthetic `FILE` records, an end-to-end scan of a
-hand-built in-memory NTFS volume image, and an oracle comparison against a recursive
-scanner on a temp directory.
+测试默认**关闭**，且不需要管理员权限。`tests/unit_tests.cpp` 是手写的小型 runner，
+覆盖：手工构造的 `FILE` 记录、在内存卷镜像上的端到端 MFT 扫描，以及针对临时目录与递归
+扫描器对拍的 oracle 测试。
 
-## 🚀 Usage
+## 🚀 使用
 
-1. Launch `spacelens.exe` and accept the UAC prompt.
-2. Pick an NTFS volume from the toolbar and press **扫描** (Scan).
-3. Click a folder row (or a breadcrumb segment) to drill in.
-4. Drag the threshold slider to hide small items, type in the box to filter names.
-5. Right-click a row for *open in Explorer* / *copy path* / *copy size*.
+1. 运行 `spacelens.exe`，在 UAC 提示中允许提权。
+2. 在工具栏选择一个 NTFS 卷，点击 **扫描**。
+3. 点击某一行（或面包屑）进入下级目录。
+4. 拖动阈值滑杆隐藏小项，在输入框里按名称筛选。
+5. 右键某行可*在资源管理器中打开* / *复制路径* / *复制大小*。
 
-### Dev & QA environment variables
+### 开发 / QA 环境变量
 
-| Variable | Effect |
+| 变量 | 作用 |
 | --- | --- |
-| `SPACELENS_DEV_DIR=<dir>` | Scan `<dir>` with the portable recursive scanner instead of the MFT (no admin needed). For development only. |
-| `SPACELENS_LOG=<file>` | Write a tiny GUI debug log (frame count, node count). |
-| `SPACELENS_CAPTURE=<file.bmp>` | Dump the client area to a 32-bit BMP at frame 120 and exit — headless visual QA. |
-| `SPACELENS_NO_ADMIN_MANIFEST=ON` (CMake) | Build without the `requireAdministrator` manifest, e.g. for smoke tests. |
+| `SPACELENS_DEV_DIR=<目录>` | 改用可移植的递归扫描器扫描指定目录，不需要管理员权限。仅供开发调试。 |
+| `SPACELENS_LOG=<文件>` | 输出极简 GUI 调试日志（帧数、节点数）。 |
+| `SPACELENS_CAPTURE=<文件.bmp>` | 在第 120 帧把客户区导出为 32 位 BMP 后退出 —— 用于无头视觉 QA。 |
+| `SPACELENS_NO_ADMIN_MANIFEST=ON`（CMake） | 构建时不嵌入 `requireAdministrator` 清单，便于自动化冒烟测试。 |
 
-## ⚙️ How it works
+## ⚙️ 实现原理
 
 ```
-boot sector ─► MFT location / cluster + record geometry
-$MFT record ─► its own run list (handles MFT fragmentation)
+引导扇区   ─► MFT 起始位置 / 簇与记录大小
+$MFT 记录  ─► 它自己的 run list（处理 MFT 自身的碎片）
    │
-   ├─ read MFT in large sequential blocks
-   ├─ parse FILE records: $STANDARD_INFORMATION, $FILE_NAME, $DATA, $ATTRIBUTE_LIST
-   ├─ skip deleted records and NTFS metadata (record# < 16, except root #5)
-   └─ rebuild the tree by parent FRN (validating the FRN sequence number)
-          └─ aggregate sizes bottom-up into a compact arena of nodes
+   ├─ 大块顺序读取 MFT
+   ├─ 解析 FILE 记录：$STANDARD_INFORMATION、$FILE_NAME、$DATA、$ATTRIBUTE_LIST
+   ├─ 跳过已删除记录与 NTFS 元数据（记录号 < 16，根目录 #5 除外）
+   └─ 按父 FRN 重建目录树（校验 FRN 序列号）
+          └─ 自底向上聚合大小，写入紧凑的 arena 节点数组
 ```
 
-Notes on the parts that bite:
+几个容易踩的坑：
 
-- Sizes come from the **unnamed `$DATA`** attribute (non-resident header / resident
-  length), falling back to `$FILE_NAME`. `$STANDARD_INFORMATION` carries no size.
-- Large or fragmented files keep `$DATA` in extension records listed by
-  `$ATTRIBUTE_LIST`; the scanner follows the list to the lowest-VCN extent. In that
-  case the base record's `$FILE_NAME` size is `0` and must not be trusted.
-- **Hard links are counted once per directory entry** (same as Explorer), so totals on
-  volumes with hard links (`C:\Windows\WinSxS`) exceed the physical usage — expected.
-- Names use namespace 0/1/2/3; one name is chosen per parent record, preferring Win32.
-- Everything is `uint64_t`; folders can exceed 4 GB.
+- 大小取自**未命名的 `$DATA`**（非常驻取头部字段，常驻取内容长度），缺失时回退
+  `$FILE_NAME`；`$STANDARD_INFORMATION` 不含大小字段。
+- 大文件 / 碎片文件的 `$DATA` 可能位于 `$ATTRIBUTE_LIST` 列出的扩展记录中，扫描器会
+  跟随列表取 VCN 最低的 extent；此时基础记录的 `$FILE_NAME` 大小为 `0`，不可作为回退。
+- **硬链接按目录项各计一次**（与资源管理器一致），因此存在硬链接的卷
+  （如 `C:\Windows\WinSxS`）合计会大于物理占用，属预期行为。
+- 文件名的命名空间可能是 0/1/2/3；每个父记录挑一个名字，优先 Win32。
+- 所有大小均为 `uint64_t`，文件夹可超过 4 GB。
 
-## 🗂️ Project layout
+## 🗂️ 项目结构
 
 ```
-include/            public headers (ntfs, tree, scan, format, utf8)
-src/core/           spacelens_core static lib — MFT parsing, tree, scanners (no UI)
-src/gui/app.cpp     Win32 + DirectX 11 + Dear ImGui front end
-tests/              hand-written unit / end-to-end tests
-tools/              optional diagnostics (mft_scan, mft_record) via -DSPACELENS_TOOLS=ON
-third_party/imgui   Dear ImGui submodule (don't edit; move the pin to upgrade)
+include/            公共头文件（ntfs、tree、scan、format、utf8）
+src/core/           spacelens_core 静态库 —— MFT 解析、目录树、扫描器（无 UI 依赖）
+src/gui/app.cpp     Win32 + DirectX 11 + Dear ImGui 前端
+tests/              手写的单元 / 端到端测试
+tools/              可选诊断工具（mft_scan、mft_record），-DSPACELENS_TOOLS=ON 构建
+third_party/imgui   Dear ImGui submodule（不要直接修改；升级只需移动 pin）
 ```
 
-Source files are listed explicitly in `CMakeLists.txt` (no globs) — add new files to the
-right target. See [`需求文档.md`](需求文档.md) for the full (Chinese) specification and
-[`AGENTS.md`](AGENTS.md) for contributor conventions.
+源文件在 `CMakeLists.txt` 中显式列出（不使用 glob），新增文件记得加到对应 target。
+完整（中文）需求见 [`需求文档.md`](需求文档.md)，贡献约定见 [`AGENTS.md`](AGENTS.md)。
 
-## 🗺️ Roadmap
+## 🗺️ 路线图
 
-Not in scope for the current version: treemap visualization, arbitrary directory as scan
-root, duplicate finder, delete/cleanup, export, real-time monitoring, CLI mode, non-NTFS
-and cross-platform support.
+当前版本不做：矩形树图（Treemap）、以任意目录为扫描根、重复文件查找、删除 / 清理、
+导出报告、实时监控、命令行模式、非 NTFS 与跨平台支持。
 
-## 📄 License
+## 📄 许可证
 
-[MIT](LICENSE).
+[MIT](LICENSE)。
