@@ -10,7 +10,7 @@
 [![UI](https://img.shields.io/badge/UI-Dear%20ImGui%20%2B%20DirectX%2011-1f6feb)](#-构建)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**简体中文** · [English](README.md)
+**简体中文** · [English](README.en.md)
 
 [功能](#-功能) · [截图](#-截图) · [环境要求](#-环境要求) · [构建](#-构建) · [使用](#-使用) · [实现原理](#-实现原理)
 

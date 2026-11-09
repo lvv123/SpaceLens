@@ -10,7 +10,7 @@
 [![UI](https://img.shields.io/badge/UI-Dear%20ImGui%20%2B%20DirectX%2011-1f6feb)](#build)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**English** · [简体中文](README.zh-CN.md)
+**English** · [简体中文](README.md)
 
 [Features](#-features) · [Screenshot](#-screenshot) · [Requirements](#-requirements) · [Build](#-build) · [Usage](#-usage) · [How it works](#-how-it-works)
 
