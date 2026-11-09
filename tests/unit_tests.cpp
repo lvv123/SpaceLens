@@ -1,7 +1,6 @@
-// Unit tests for the compute_space core. No test framework: a tiny harness that
+// Unit tests for the SpaceLens core. No test framework: a tiny harness that
 // counts failures and returns non-zero, so ctest can consume it directly.
 
-#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -14,7 +13,6 @@
 #include "ntfs.hpp"
 #include "scan.hpp"
 #include "tree.hpp"
-#include "treemap.hpp"
 
 namespace {
 
@@ -414,6 +412,11 @@ void test_boot_sector() {
     CHECK(bs.bytesPerFileRecord == 1024);
     CHECK(bs.mftLcn == 0x400000);
 
+    // 中文注释：cpr=-128 时取负得到 128，移位 1u<<128 是 UB；必须干净地拒绝。
+    boot[64] = 0x80;
+    CHECK(!cs::ntfs::parse_boot_sector(boot, sizeof(boot), bs));
+    boot[64] = 0xF6;
+
     CHECK(!cs::ntfs::parse_boot_sector(boot, 10, bs));
     std::memcpy(boot + 3, "FAT32   ", 8);
     CHECK(!cs::ntfs::parse_boot_sector(boot, sizeof(boot), bs));
@@ -434,6 +437,51 @@ void test_run_list() {
 
     const uint8_t bad[] = {0x11, 0x0A};  // declares 1 offset byte but none follow
     CHECK(!cs::ntfs::decode_run_list(bad, sizeof(bad), runs));
+
+    // 中文注释：第二个 run 的 delta=1 会让 LCN 从 INT64_MAX 溢出；必须拒绝。
+    uint8_t overflow[20] = {};
+    overflow[0] = 0x88;  // 8 字节长度 + 8 字节 LCN 偏移
+    put64(overflow + 1, 1);
+    put64(overflow + 9, 0x7FFFFFFFFFFFFFFFull);
+    overflow[17] = 0x11;  // 1 字节长度 + 1 字节 LCN 偏移
+    overflow[18] = 1;
+    overflow[19] = 1;
+    CHECK(!cs::ntfs::decode_run_list(overflow, sizeof(overflow), runs));
+}
+
+void test_malformed_record_bounds() {
+    // 中文注释：属性只声明 16 字节（非常驻头的公共部分），不能继续读 +0x30 的大小。
+    uint8_t rec[96] = {};
+    std::memcpy(rec, "FILE", 4);
+    put16(rec + 20, 48);  // first attribute
+    put16(rec + 22, 0x0001);
+    put32(rec + 24, sizeof(rec));  // used size
+    put32(rec + 48, 0x80);         // $DATA
+    put32(rec + 52, 16);           // attribute length
+    rec[56] = 1;                   // non-resident
+    {
+        cs::ntfs::FileRecord fr;
+        CHECK(cs::ntfs::parse_file_record(rec, sizeof(rec), 1, 512, fr));
+        CHECK(fr.valid);
+        CHECK(fr.realSize == 0 && fr.allocatedSize == 0);
+    }
+
+    // 中文注释：contentOff/contentLen 都不能超出属性长度；这里用超大偏移模拟回绕。
+    std::memset(rec, 0, sizeof(rec));
+    std::memcpy(rec, "FILE", 4);
+    put16(rec + 20, 48);
+    put16(rec + 22, 0x0001);
+    put32(rec + 24, sizeof(rec));
+    put32(rec + 48, 0x30);  // $FILE_NAME
+    put32(rec + 52, 24);    // 常驻属性头长度
+    put32(rec + 48 + 16, 0x100);   // contentLen
+    put16(rec + 48 + 20, 0xFFFF);  // contentOff 远超属性长度
+    {
+        cs::ntfs::FileRecord fr;
+        CHECK(cs::ntfs::parse_file_record(rec, sizeof(rec), 1, 512, fr));
+        CHECK(fr.valid);
+        CHECK(fr.names.empty());
+    }
 }
 
 void test_file_record() {
@@ -605,46 +653,6 @@ void test_categorize() {
     CHECK(cs::categorize(L"", 0) == cs::Category::Other);
 }
 
-// --------------------------------- group: treemap --------------------------
-void test_treemap() {
-    std::vector<double> weights = {6, 6, 4, 3, 2, 2, 1};
-    cs::Rect bounds{0, 0, 100, 60};
-    std::vector<cs::Rect> rects;
-    cs::squarified_treemap(weights, bounds, rects);
-    CHECK(rects.size() == weights.size());
-
-    double area = 0.0;
-    for (const auto& r : rects) {
-        CHECK(r.x >= -0.01f && r.y >= -0.01f);
-        CHECK(r.x + r.w <= bounds.w + 0.5f);
-        CHECK(r.y + r.h <= bounds.h + 0.5f);
-        area += static_cast<double>(r.w) * r.h;
-    }
-    const double expected = static_cast<double>(bounds.w) * bounds.h;
-    CHECK(std::abs(area - expected) / expected < 0.02);
-
-    size_t biggest = 0;
-    for (size_t i = 1; i < rects.size(); ++i)
-        if (rects[i].w * rects[i].h > rects[biggest].w * rects[biggest].h) biggest = i;
-    CHECK(biggest == 0);
-}
-
-void test_treemap_edges() {
-    std::vector<cs::Rect> rects;
-    cs::squarified_treemap({}, cs::Rect{0, 0, 100, 100}, rects);
-    CHECK(rects.empty());
-
-    cs::squarified_treemap({42.0}, cs::Rect{0, 0, 100, 50}, rects);
-    CHECK(rects.size() == 1);
-    CHECK(std::abs(rects[0].w * rects[0].h - 5000.0) < 1.0);
-
-    cs::squarified_treemap({0, 0}, cs::Rect{0, 0, 100, 100}, rects);
-    CHECK(rects.size() == 2);  // no crash, empty rects
-
-    cs::squarified_treemap({5, 5}, cs::Rect{0, 0, 0, 0}, rects);  // degenerate bounds
-    CHECK(rects.size() == 2);
-}
-
 // --------------------------------- group: format ---------------------------
 void test_human_size() {
     CHECK(cs::human_size(0) == "0 B");
@@ -757,7 +765,7 @@ void test_mft_bad_images() {
 // --------------------------------- group: recursive scanner ----------------
 void test_recursive_scanner() {
     namespace fs = std::filesystem;
-    const fs::path dir = fs::temp_directory_path() / "compute_space_unit_test";
+    const fs::path dir = fs::temp_directory_path() / "spacelens_unit_test";
     std::error_code ec;
     fs::remove_all(dir, ec);
     fs::create_directories(dir / "sub" / "deep", ec);
@@ -784,13 +792,16 @@ void test_recursive_scanner() {
     CHECK(find_child(tree, tree.root(), L"empty") != cs::VolumeTree::kInvalid);
     CHECK(tree.node(find_child(tree, tree.root(), L"empty")).totalSize == 0);
 
-    // Cancel before starting leaves only the root.
+    // 中文注释：取消必须报告失败并丢弃半成品树，不能伪装成成功扫描。
     cs::VolumeTree tree2;
     cs::ScanProgress progress2;
     progress2.cancel.store(true);
     std::wstring error2;
-    CHECK(cs::scan_directory_recursive(dir.wstring(), tree2, progress2, error2));
-    CHECK(tree2.nodeCount() == 1);
+    CHECK(!cs::scan_directory_recursive(dir.wstring(), tree2, progress2, error2));
+    CHECK(!error2.empty());
+    CHECK(progress2.failed.load());
+    CHECK(!progress2.finished.load());
+    CHECK(tree2.nodeCount() == 0);
 
     fs::remove_all(dir, ec);
 }
@@ -807,6 +818,7 @@ int main() {
     test_boot_sector();
     test_run_list();
     test_file_record();
+    test_malformed_record_bounds();
     test_data_authoritative();
     test_size_filename_fallback();
     test_directory_record();
@@ -818,9 +830,6 @@ int main() {
     test_tree_aggregate();
     test_tree_category();
     test_categorize();
-
-    test_treemap();
-    test_treemap_edges();
 
     test_human_size();
 

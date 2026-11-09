@@ -1,6 +1,7 @@
 #include "ntfs.hpp"
 
 #include <cstring>
+#include <limits>
 
 namespace cs::ntfs {
 namespace {
@@ -82,7 +83,11 @@ bool parse_boot_sector(const uint8_t* data, size_t size, BootSector& out) {
     if (cpr > 0) {
         out.bytesPerFileRecord = static_cast<uint32_t>(cpr) * out.bytesPerCluster;
     } else if (cpr < 0) {
-        out.bytesPerFileRecord = 1u << (-cpr);
+        // 中文注释：cpr 是 int8_t，取负后可能达到 128；移位位数不小于 32 是 UB。
+        // 因此先拒绝非法移位，再计算记录大小（后续调用方还会限制在 4096 以内）。
+        const int shift = -static_cast<int>(cpr);
+        if (shift >= 32) return false;
+        out.bytesPerFileRecord = 1u << shift;
     } else {
         return false;
     }
@@ -128,6 +133,10 @@ bool decode_run_list(const uint8_t* runs, size_t size, std::vector<Run>& out) {
         if (sparse) {
             r.lcn = 0;
         } else {
+            // 中文注释：runlist 来自磁盘，delta 可能接近 INT64_MAX/MIN。
+            // 直接相加会产生有符号溢出（UB），所以先做带符号的范围检查。
+            if (delta > 0 && lcn > (std::numeric_limits<int64_t>::max)() - delta) return false;
+            if (delta < 0 && lcn < (std::numeric_limits<int64_t>::min)() - delta) return false;
             lcn += delta;
             if (lcn < 0) return false;
             r.lcn = static_cast<uint64_t>(lcn);
@@ -203,42 +212,48 @@ bool parse_file_record(const uint8_t* record, size_t recordSize,
     bool nonResident = false;
     while (it.next(attr, type, length, nonResident)) {
         const uint8_t attrNameLen = attr[9];
+        // 中文注释：AttrIterator 只保证属性头有 16 字节；下面读取常驻/非驻留
+        // 字段前，必须先确认属性本身足够长，否则会越过记录缓冲区。
         if (type == kAttrStandardInformation && !nonResident) {
             // $STANDARD_INFORMATION carries no size fields; only note its presence.
             out.hasStandardInformation = true;
         } else if (type == kAttrFileName && !nonResident) {
+            if (length < 0x18) continue;  // 常驻头：contentLen/contentOff 在 +16/+20
             const uint32_t contentLen = rd32(attr + 16);
             const uint16_t contentOff = rd16(attr + 20);
-            if (static_cast<uint32_t>(contentOff) + contentLen <= length && contentLen >= 0x42) {
-                const uint8_t* fn = attr + contentOff;
-                const uint8_t nameLen = fn[0x40];
-                const uint8_t nameSpace = fn[0x41];
-                if (static_cast<size_t>(0x42) + static_cast<size_t>(nameLen) * 2 <= contentLen) {
-                    FileNameEntry e;
-                    e.parentRef  = rd64(fn + 0);
-                    e.name       = reinterpret_cast<const wchar_t*>(fn + 0x42);
-                    e.nameLength = nameLen;
-                    e.nameSpace  = nameSpace;
-                    if (e.nameLength > 0) out.names.push_back(e);
-                    if (rd32(fn + 0x38) & 0x10000000u) out.isDirectory = true;
-                    if (!hasFileNameSize) {
-                        fnAlloc = rd64(fn + 0x28);
-                        fnReal  = rd64(fn + 0x30);
-                        hasFileNameSize = true;
-                    }
+            // 中文注释：用减法判断范围，避免 contentOff + contentLen 在 32 位上回绕。
+            if (contentOff > length || contentLen > length - contentOff) continue;
+            if (contentLen < 0x42) continue;  // $FILE_NAME 固定头到 +0x42
+            const uint8_t* fn = attr + contentOff;
+            const uint8_t nameLen = fn[0x40];
+            const uint8_t nameSpace = fn[0x41];
+            if (static_cast<size_t>(0x42) + static_cast<size_t>(nameLen) * 2 <= contentLen) {
+                FileNameEntry e;
+                e.parentRef  = rd64(fn + 0);
+                e.name       = reinterpret_cast<const wchar_t*>(fn + 0x42);
+                e.nameLength = nameLen;
+                e.nameSpace  = nameSpace;
+                if (e.nameLength > 0) out.names.push_back(e);
+                if (rd32(fn + 0x38) & 0x10000000u) out.isDirectory = true;
+                if (!hasFileNameSize) {
+                    fnAlloc = rd64(fn + 0x28);
+                    fnReal  = rd64(fn + 0x30);
+                    hasFileNameSize = true;
                 }
             }
         } else if (type == kAttrAttributeList) {
             if (!nonResident) {
+                if (length < 0x18) continue;  // 常驻头
                 const uint32_t contentLen = rd32(attr + 16);
                 const uint16_t contentOff = rd16(attr + 20);
-                if (static_cast<uint32_t>(contentOff) + contentLen <= length) {
-                    attrListFound = find_data_extent_in_attribute_list(attr + contentOff,
-                                                                       contentLen, attrListDataRef);
-                }
+                // 中文注释：同样使用减法检查，防止 32 位加法回绕后越界读取。
+                if (contentOff > length || contentLen > length - contentOff) continue;
+                attrListFound = find_data_extent_in_attribute_list(attr + contentOff,
+                                                                   contentLen, attrListDataRef);
             } else {
+                if (length < 0x38) continue;  // 非驻留头至少需要 0x38 字节
                 const uint16_t runOff = rd16(attr + 32);
-                if (runOff < length) {
+                if (runOff >= 0x38 && runOff < length) {
                     decode_run_list(attr + runOff, length - runOff, out.attrListRuns);
                     out.attrListRealSize = rd64(attr + 48);
                     out.hasAttrListRuns = !out.attrListRuns.empty();
@@ -248,6 +263,11 @@ bool parse_file_record(const uint8_t* record, size_t recordSize,
             // The unnamed $DATA stream is the authoritative size source. When the
             // attribute is split, keep the extent with the lowest VCN (its header
             // carries the real size).
+            if (nonResident) {
+                if (length < 0x38) continue;  // 非驻留头：vcn/alloc/real 到 +0x30
+            } else if (length < 0x14) {
+                continue;  // 常驻头：value length 在 +16（4 字节）
+            }
             const uint64_t vcn = nonResident ? rd64(attr + 0x10) : 0;
             if (!hasData || vcn < dataBestVcn) {
                 dataBestVcn = vcn;
@@ -290,8 +310,11 @@ bool decode_data_attribute(const uint8_t* record, size_t recordSize,
         if (type != kAttrData) continue;
         if (attr[9] != 0) continue;  // named stream
         if (!nonResident) continue;  // no runs
+        // 中文注释：非驻留属性头至少 0x38 字节，runOff/realSize/allocatedSize
+        // 都位于这个范围内；长度不足时直接跳过，避免越界读。
+        if (length < 0x38) continue;
         const uint16_t runOff = rd16(attr + 32);
-        if (runOff >= length) return false;
+        if (runOff < 0x38 || runOff >= length) return false;
         realSize      = rd64(attr + 48);
         allocatedSize = rd64(attr + 40);
         return decode_run_list(attr + runOff, length - runOff, runs);

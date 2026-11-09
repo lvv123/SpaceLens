@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstring>
+#include <exception>
+#include <new>
 
 #include "ntfs.hpp"
 
@@ -78,8 +80,18 @@ std::vector<std::wstring> list_ntfs_volumes() {
     return out;
 }
 
-bool scan_mft(VolumeReader& reader, const std::wstring& volumeRoot, VolumeTree& tree,
-              ScanProgress& progress, std::wstring& error) {
+static bool scan_mft_impl(VolumeReader& reader, const std::wstring& volumeRoot,
+                          VolumeTree& tree, ScanProgress& progress, std::wstring& error) {
+    // 中文注释：调用方负责在启动前用 ScanProgress::reset() 清零进度。这里
+    // 不能再次 reset，否则会把用户刚设置的 cancel 标志覆盖掉。
+    if (progress.cancel.load(std::memory_order_relaxed)) {
+        tree.clear();
+        error = L"扫描已取消";
+        progress.finished.store(false, std::memory_order_relaxed);
+        progress.failed.store(true, std::memory_order_relaxed);
+        return false;
+    }
+
     tree.clear();
     error.clear();
 
@@ -131,6 +143,13 @@ bool scan_mft(VolumeReader& reader, const std::wstring& volumeRoot, VolumeTree& 
     progress.totalRecords.store(recordCount, std::memory_order_relaxed);
     if (recordCount == 0) {
         error = L"MFT 为空";
+        progress.failed = true;
+        return false;
+    }
+    // 中文注释：目录索引、记录状态等数组按 uint32 记录号索引；超过 2^32-1
+    // 的记录数无法表示，也可能导致后续 size_t 乘法异常，必须提前拒绝。
+    if (recordCount > 0xFFFFFFFFull) {
+        error = L"MFT 记录数量超出支持范围";
         progress.failed = true;
         return false;
     }
@@ -217,7 +236,7 @@ bool scan_mft(VolumeReader& reader, const std::wstring& volumeRoot, VolumeTree& 
             rootNode = tree.addNode(volumeRoot.c_str(),
                                     static_cast<uint32_t>(volumeRoot.size()), 0, 0, true, idx);
             parentRef.push_back(0);
-            dirNode[5] = rootNode;
+            dirNode[5] = static_cast<uint32_t>(rootNode);
             recSeq[5] = fr.sequence;
             recStatus[5] |= 0x04;
             return;
@@ -359,6 +378,15 @@ bool scan_mft(VolumeReader& reader, const std::wstring& volumeRoot, VolumeTree& 
         }
     }
 
+    // 中文注释：取消时丢弃已建立的半成品树，并明确报告失败；不能把取消
+    // 当成一次成功扫描发布给 UI。
+    if (cancelled || progress.cancel.load(std::memory_order_relaxed)) {
+        tree.clear();
+        error = L"扫描已取消";
+        progress.finished.store(false, std::memory_order_relaxed);
+        progress.failed.store(true, std::memory_order_relaxed);
+        return false;
+    }
     if (readFailed) {
         error = L"读取 MFT 数据时失败";
         progress.failed = true;
@@ -428,11 +456,32 @@ bool scan_mft(VolumeReader& reader, const std::wstring& volumeRoot, VolumeTree& 
         progress.orphanBytes.store(orphanBytes, std::memory_order_relaxed);
     }
 
-    tree.setRoot(rootNode);
+    tree.setRoot(static_cast<uint32_t>(rootNode));
     tree.aggregate();
     tree.sortChildrenBySizeDesc();
     progress.finished.store(true, std::memory_order_relaxed);
     return true;
+}
+
+bool scan_mft(VolumeReader& reader, const std::wstring& volumeRoot, VolumeTree& tree,
+              ScanProgress& progress, std::wstring& error) {
+    // 中文注释：磁盘数据或容量异常可能触发内存分配失败；在扫描入口统一
+    // 转换成错误结果，避免异常从 GUI 工作线程逃逸导致 std::terminate。
+    try {
+        return scan_mft_impl(reader, volumeRoot, tree, progress, error);
+    } catch (const std::bad_alloc&) {
+        tree.clear();
+        error = L"内存不足，扫描已中止";
+        progress.finished.store(false, std::memory_order_relaxed);
+        progress.failed.store(true, std::memory_order_relaxed);
+        return false;
+    } catch (const std::exception&) {
+        tree.clear();
+        error = L"扫描时发生内部异常";
+        progress.finished.store(false, std::memory_order_relaxed);
+        progress.failed.store(true, std::memory_order_relaxed);
+        return false;
+    }
 }
 
 bool scan_volume_mft(const std::wstring& volumeRoot, VolumeTree& tree,

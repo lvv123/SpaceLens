@@ -11,8 +11,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <exception>
+#include <future>
 #include <string>
-#include <thread>
 #include <vector>
 
 #include "imgui.h"
@@ -22,7 +23,6 @@
 #include "format.hpp"
 #include "scan.hpp"
 #include "tree.hpp"
-#include "treemap_view.hpp"
 #include "utf8.hpp"
 
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -30,14 +30,42 @@ extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam
 namespace gui {
 namespace {
 
-// Optional debug log: set COMPUTE_SPACE_LOG to a file path.
+enum class SizeBasis : int { Logical = 0, OnDisk = 1 };
+
+uint32_t category_color(uint8_t category) {
+    switch (static_cast<cs::Category>(category)) {
+        case cs::Category::Video:      return IM_COL32(198, 72, 72, 235);
+        case cs::Category::Image:      return IM_COL32(214, 140, 58, 235);
+        case cs::Category::Audio:      return IM_COL32(178, 104, 186, 235);
+        case cs::Category::Document:   return IM_COL32(72, 118, 198, 235);
+        case cs::Category::Archive:    return IM_COL32(160, 156, 70, 235);
+        case cs::Category::Executable: return IM_COL32(88, 176, 116, 235);
+        case cs::Category::Code:       return IM_COL32(70, 166, 178, 235);
+        default:                       return IM_COL32(120, 122, 128, 235);
+    }
+}
+
+const char* category_name(uint8_t category) {
+    switch (static_cast<cs::Category>(category)) {
+        case cs::Category::Video:      return "视频";
+        case cs::Category::Image:      return "图片";
+        case cs::Category::Audio:      return "音频";
+        case cs::Category::Document:   return "文档";
+        case cs::Category::Archive:    return "压缩包";
+        case cs::Category::Executable: return "可执行";
+        case cs::Category::Code:       return "代码";
+        default:                       return "其他";
+    }
+}
+
+// Optional debug log: set SPACELENS_LOG to a file path.
 void dbg(const char* msg) {
     static FILE* f = nullptr;
     static bool initialized = false;
     if (!initialized) {
         initialized = true;
         wchar_t path[1024] = {};
-        if (GetEnvironmentVariableW(L"COMPUTE_SPACE_LOG", path, 1024) > 0) {
+        if (GetEnvironmentVariableW(L"SPACELENS_LOG", path, 1024) > 0) {
             _wfopen_s(&f, path, L"a");
         }
     }
@@ -82,12 +110,21 @@ bool create_device(HWND hwnd) {
     return SUCCEEDED(hr);
 }
 
-void create_rtv() {
+void cleanup_rtv();  // 定义在 create_rtv 之后
+
+bool create_rtv() {
+    // 中文注释：创建失败必须返回 false；否则后续会用空 RTV 清屏，DX11 会报错。
+    cleanup_rtv();
     ID3D11Texture2D* back = nullptr;
-    if (SUCCEEDED(g_swapChain->GetBuffer(0, IID_PPV_ARGS(&back))) && back != nullptr) {
-        g_device->CreateRenderTargetView(back, nullptr, &g_rtv);
-        back->Release();
+    const HRESULT getHr = g_swapChain->GetBuffer(0, IID_PPV_ARGS(&back));
+    if (FAILED(getHr) || back == nullptr) return false;
+    const HRESULT rtvHr = g_device->CreateRenderTargetView(back, nullptr, &g_rtv);
+    back->Release();
+    if (FAILED(rtvHr)) {
+        g_rtv = nullptr;
+        return false;
     }
+    return g_rtv != nullptr;
 }
 
 void cleanup_rtv() {
@@ -104,7 +141,7 @@ void cleanup_device() {
     if (g_device)    { g_device->Release();    g_device = nullptr; }
 }
 
-// Dev/QA: dump the current back buffer to a 32-bit BMP (env COMPUTE_SPACE_CAPTURE).
+// Dev/QA: dump the current back buffer to a 32-bit BMP (env SPACELENS_CAPTURE).
 void save_backbuffer_bmp(const std::wstring& path) {
     ID3D11Texture2D* back = nullptr;
     if (FAILED(g_swapChain->GetBuffer(0, IID_PPV_ARGS(&back))) || back == nullptr) return;
@@ -162,21 +199,29 @@ void save_backbuffer_bmp(const std::wstring& path) {
 }
 
 // --------------------------------------------------------------------- State
+// 中文注释：工作线程只构造这个局部结果，不直接触碰下面的 g_tree/g_error。
+// UI 线程在 poll_scan() 中取回结果后再一次性安装，避免数据竞争。
+struct ScanOutcome {
+    bool ok = false;
+    cs::VolumeTree tree;
+    std::wstring error;
+};
+
 cs::VolumeTree            g_tree;
 std::vector<std::wstring> g_volumes;
 int                       g_volumeIndex = 0;
-std::thread               g_worker;
+std::future<ScanOutcome>  g_scanFuture;
 cs::ScanProgress          g_progress;
 std::atomic<bool>         g_scanning{false};
 std::vector<uint32_t>     g_path;
 uint32_t                  g_current = cs::VolumeTree::kInvalid;
 uint64_t                  g_threshold = 1u << 20;
-gui::SizeBasis            g_basis = gui::SizeBasis::Logical;
+SizeBasis                 g_basis = SizeBasis::Logical;
 std::wstring              g_error;
-std::vector<uint32_t>     g_otherNodes;
-bool                      g_openOtherPopup = false;
+uint64_t                  g_filteredCount = 0;
+uint64_t                  g_filteredBytes = 0;
 bool                      g_volumeAccessible = true;
-std::wstring              g_capturePath;  // dev: COMPUTE_SPACE_CAPTURE
+std::wstring              g_capturePath;  // dev: SPACELENS_CAPTURE
 
 std::vector<uint32_t> g_childOrder;      // current folder's children, sorted/filtered
 int                   g_sortCol = 1;     // 0 = name, 1 = size, 2 = percent
@@ -211,86 +256,112 @@ bool can_open_volume() {
 }
 
 void reset_progress() {
-    g_progress.recordsRead.store(0);
-    g_progress.totalRecords.store(0);
-    g_progress.bytesRead.store(0);
-    g_progress.cancel.store(false);
-    g_progress.finished.store(false);
-    g_progress.failed.store(false);
+    // 中文注释：统一交给 ScanProgress::reset()，避免新增计数字段时漏清零。
+    g_progress.reset();
 }
 
-// Dev-only: when COMPUTE_SPACE_DEV_DIR is set, scan that directory with the
+// Dev-only: when SPACELENS_DEV_DIR is set, scan that directory with the
 // portable recursive scanner instead of MFT. Lets the GUI be exercised without
 // administrator rights. Never set in normal runs.
 bool dev_recursive_dir(std::wstring& out) {
     wchar_t buf[1024] = {};
-    const DWORD n = GetEnvironmentVariableW(L"COMPUTE_SPACE_DEV_DIR", buf, 1024);
+    const DWORD n = GetEnvironmentVariableW(L"SPACELENS_DEV_DIR", buf, 1024);
     if (n == 0 || n >= 1024) return false;
     out.assign(buf, n);
     return true;
 }
 
 void start_scan() {
-    if (g_worker.joinable()) g_worker.join();
+    // 中文注释：正常流程下扫描按钮在扫描期间是禁用的；这里仍防御性收尾上一次
+    // 任务，保证 std::future 在复用前已经取回结果。
+    if (g_scanFuture.valid()) {
+        g_progress.cancel.store(true, std::memory_order_relaxed);
+        try {
+            g_scanFuture.get();
+        } catch (...) {
+        }
+    }
     g_tree.clear();
     g_path.clear();
     g_current = cs::VolumeTree::kInvalid;
     g_error.clear();
-    g_otherNodes.clear();
     reset_progress();
     g_scanning.store(true);
 
     std::wstring devDir;
     if (dev_recursive_dir(devDir)) {
-        g_worker = std::thread([devDir]() {
-            cs::VolumeTree local;
-            std::wstring err;
-            if (cs::scan_directory_recursive(devDir, local, g_progress, err)) {
-                g_tree = std::move(local);
-            } else {
-                g_error = err;
-            }
-        });
+        try {
+            g_scanFuture = std::async(std::launch::async, [devDir]() {
+                ScanOutcome out;
+                out.ok = cs::scan_directory_recursive(devDir, out.tree, g_progress, out.error);
+                return out;
+            });
+        } catch (const std::exception&) {
+            g_scanning.store(false);
+            g_error = L"无法启动扫描线程";
+            g_progress.failed.store(true, std::memory_order_relaxed);
+        }
         return;
     }
 
     const std::wstring vol = g_volumes.empty() ? std::wstring(L"C:") : g_volumes[g_volumeIndex];
-    g_worker = std::thread([vol]() {
-        cs::VolumeTree local;
-        std::wstring err;
-        const bool ok = cs::scan_volume_mft(vol, local, g_progress, err);
-        if (ok) {
-            g_tree = std::move(local);
-        } else {
-            g_error = err;
-        }
-    });
+    try {
+        g_scanFuture = std::async(std::launch::async, [vol]() {
+            ScanOutcome out;
+            out.ok = cs::scan_volume_mft(vol, out.tree, g_progress, out.error);
+            return out;
+        });
+    } catch (const std::exception&) {
+        g_scanning.store(false);
+        g_error = L"无法启动扫描线程";
+        g_progress.failed.store(true, std::memory_order_relaxed);
+    }
 }
 
 void poll_scan() {
     if (!g_scanning.load()) return;
-    if (g_progress.finished.load() || g_progress.failed.load()) {
-        if (g_worker.joinable()) g_worker.join();
-        g_scanning.store(false);
-        if (!g_progress.failed.load() && g_tree.nodeCount() > 0) {
-            g_current = g_tree.root();
-            g_path.assign(1, g_current);
-            g_orderDirty = true;
-            const uint64_t rs = g_tree.node(g_current).totalSize;
-            g_threshold = (rs > 1000) ? rs / 1000 : 1024;
-            char buf[256];
-            std::snprintf(buf, sizeof(buf),
-                          "scan: records=%llu files=%llu dirs=%llu orphans=%llu (%llu bytes) "
-                          "noParent=%llu seqMismatch=%llu",
-                          static_cast<unsigned long long>(g_progress.totalRecords.load()),
-                          static_cast<unsigned long long>(g_progress.fileCount.load()),
-                          static_cast<unsigned long long>(g_progress.dirCount.load()),
-                          static_cast<unsigned long long>(g_progress.orphanNodes.load()),
-                          static_cast<unsigned long long>(g_progress.orphanBytes.load()),
-                          static_cast<unsigned long long>(g_progress.orphanNoParent.load()),
-                          static_cast<unsigned long long>(g_progress.orphanSeqMismatch.load()));
-            dbg(buf);
+    if (!g_progress.finished.load() && !g_progress.failed.load()) return;
+
+    // 中文注释：扫描线程只写自己的局部结果；在这里 get() 之后才把树交给 UI，
+    // 因此之后的绘制/日志读取都不会与工作线程并发访问同一棵树。
+    ScanOutcome out;
+    if (g_scanFuture.valid()) {
+        try {
+            out = g_scanFuture.get();
+        } catch (const std::bad_alloc&) {
+            out.ok = false;
+            out.error = L"内存不足，扫描已中止";
+        } catch (const std::exception&) {
+            out.ok = false;
+            out.error = L"扫描线程发生异常";
         }
+    } else {
+        out.error = L"扫描任务状态异常";
+    }
+    g_scanning.store(false);
+
+    if (out.ok && out.tree.nodeCount() > 0) {
+        g_tree = std::move(out.tree);
+        g_current = g_tree.root();
+        g_path.assign(1, g_current);
+        g_orderDirty = true;
+        const uint64_t rs = g_tree.node(g_current).totalSize;
+        g_threshold = (rs > 1000) ? rs / 1000 : 1024;
+        char buf[256];
+        std::snprintf(buf, sizeof(buf),
+                      "scan: records=%llu files=%llu dirs=%llu orphans=%llu (%llu bytes) "
+                      "noParent=%llu seqMismatch=%llu",
+                      static_cast<unsigned long long>(g_progress.totalRecords.load()),
+                      static_cast<unsigned long long>(g_progress.fileCount.load()),
+                      static_cast<unsigned long long>(g_progress.dirCount.load()),
+                      static_cast<unsigned long long>(g_progress.orphanNodes.load()),
+                      static_cast<unsigned long long>(g_progress.orphanBytes.load()),
+                      static_cast<unsigned long long>(g_progress.orphanNoParent.load()),
+                      static_cast<unsigned long long>(g_progress.orphanSeqMismatch.load()));
+        dbg(buf);
+    } else {
+        g_error = out.error.empty() ? L"扫描失败" : out.error;
+        g_progress.failed.store(true, std::memory_order_relaxed);
     }
 }
 
@@ -340,20 +411,39 @@ void open_in_explorer(uint32_t node) {
     ShellExecuteW(nullptr, L"open", L"explorer.exe", params.c_str(), nullptr, SW_SHOWNORMAL);
 }
 
+uint64_t node_size(uint32_t i) {
+    return (g_basis == SizeBasis::Logical) ? g_tree.node(i).totalSize
+                                           : g_tree.node(i).totalAlloc;
+}
+
 void sort_children_by_spec() {
     std::sort(g_childOrder.begin(), g_childOrder.end(), [](uint32_t a, uint32_t b) {
-        bool less;
-        if (g_sortCol == 0)
-            less = g_tree.nameString(a) < g_tree.nameString(b);
-        else
-            less = g_tree.node(a).totalSize < g_tree.node(b).totalSize;
-        return g_sortAscending ? less : !less;
+        // 中文注释：比较器必须满足严格弱序。相等时不能返回 !less（那会同时
+        // 认为 a<b 和 b<a），而应退回稳定的索引比较。
+        bool aLess = false;
+        bool bLess = false;
+        if (g_sortCol == 0) {
+            const std::wstring an = g_tree.nameString(a);
+            const std::wstring bn = g_tree.nameString(b);
+            aLess = an < bn;
+            bLess = bn < an;
+        } else {
+            const uint64_t as = node_size(a);
+            const uint64_t bs = node_size(b);
+            aLess = as < bs;
+            bLess = bs < as;
+        }
+        if (aLess) return g_sortAscending;
+        if (bLess) return !g_sortAscending;
+        return a < b;
     });
 }
 
 void refresh_children() {
     g_childOrder.clear();
     g_orderDirty = false;
+    g_filteredCount = 0;
+    g_filteredBytes = 0;
     if (!g_tree.valid(g_current)) return;
     const std::string filter = ascii_lower(g_filter);
     for (uint32_t c = g_tree.node(g_current).firstChild; c != cs::VolumeTree::kInvalid;
@@ -361,6 +451,12 @@ void refresh_children() {
         if (!filter.empty()) {
             const std::string nm = ascii_lower(cs::wide_to_utf8(g_tree.nameString(c)));
             if (nm.find(filter) == std::string::npos) continue;
+        }
+        const uint64_t sz = node_size(c);
+        if (sz > 0 && sz < g_threshold) {
+            ++g_filteredCount;
+            g_filteredBytes += sz;
+            continue;
         }
         g_childOrder.push_back(c);
     }
@@ -477,6 +573,7 @@ void draw_toolbar() {
     if (ImGui::SliderFloat("##thresh", &logv, 3.0f, 10.5f, "")) {
         g_threshold = static_cast<uint64_t>(std::pow(10.0, static_cast<double>(logv)));
         if (g_threshold < 1024) g_threshold = 1024;
+        g_orderDirty = true;
     }
     ImGui::SameLine();
     ImGui::AlignTextToFramePadding();
@@ -484,94 +581,15 @@ void draw_toolbar() {
 
     ImGui::SameLine(0, 26);
     ImGui::AlignTextToFramePadding();
-    ImGui::TextDisabled("面积");
+    ImGui::TextDisabled("口径");
     ImGui::SameLine();
     int basis = static_cast<int>(g_basis);
     if (ImGui::RadioButton("逻辑", basis == 0)) basis = 0;
     ImGui::SameLine();
     if (ImGui::RadioButton("占用", basis == 1)) basis = 1;
-    g_basis = static_cast<gui::SizeBasis>(basis);
+    if (static_cast<int>(g_basis) != basis) g_orderDirty = true;
+    g_basis = static_cast<SizeBasis>(basis);
 
-    ImGui::EndChild();
-}
-
-void draw_other_popup() {
-    if (g_openOtherPopup) {
-        ImGui::OpenPopup("已过滤的项");
-        g_openOtherPopup = false;
-    }
-    if (ImGui::BeginPopupModal("已过滤的项", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::Text("小于阈值 %s 的项（共 %zu 个）：", cs::human_size(g_threshold).c_str(),
-                    g_otherNodes.size());
-        ImGui::BeginChild("##otherlist", ImVec2(460, 320), ImGuiChildFlags_Borders);
-        int shown = 0;
-        for (uint32_t n : g_otherNodes) {
-            if (shown++ >= 500) {
-                ImGui::TextUnformatted("... (列表已截断)");
-                break;
-            }
-            const uint64_t sz =
-                (g_basis == gui::SizeBasis::Logical) ? g_tree.node(n).totalSize
-                                                     : g_tree.node(n).totalAlloc;
-            ImGui::Text("%s\t%s", cs::wide_to_utf8(g_tree.nameString(n)).c_str(),
-                        cs::human_size(sz).c_str());
-        }
-        ImGui::EndChild();
-        if (ImGui::Button("关闭")) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-    }
-}
-
-void draw_treemap_panel(float width, float height) {
-    ImGui::BeginChild("treemap", ImVec2(width, height), ImGuiChildFlags_Borders,
-                      ImGuiWindowFlags_NoScrollbar);
-    if (g_scanning.load()) {
-        const uint64_t total = g_progress.totalRecords.load();
-        const uint64_t read = g_progress.recordsRead.load();
-        const float frac = (total > 0) ? static_cast<float>(static_cast<double>(read) / total) : 0.0f;
-        char buf[128];
-        std::snprintf(buf, sizeof(buf), "%llu / %llu", static_cast<unsigned long long>(read),
-                      static_cast<unsigned long long>(total));
-        ImGui::TextUnformatted("正在扫描 MFT...");
-        ImGui::ProgressBar(frac, ImVec2(-1, 0), buf);
-        ImGui::Text("已读取 %s", cs::human_size(g_progress.bytesRead.load()).c_str());
-    } else if (g_current != cs::VolumeTree::kInvalid) {
-        const auto& cur = g_tree.node(g_current);
-        char meta[160];
-        std::snprintf(meta, sizeof(meta), "%llu 项 · 合计 %s",
-                      static_cast<unsigned long long>(cur.childCount),
-                      cs::human_size(cur.totalSize).c_str());
-        std::string cname = cs::wide_to_utf8(g_tree.nameString(g_current));
-        if (cname.empty()) cname = "（根）";
-        ImGui::Text("%s", cname.c_str());
-        const float mx = ImGui::GetWindowContentRegionMax().x - ImGui::CalcTextSize(meta).x;
-        if (mx > ImGui::GetCursorPosX() + 12.0f) {
-            ImGui::SameLine(mx);
-            ImGui::TextDisabled("%s", meta);
-        }
-        ImGui::Separator();
-
-        const ImVec2 pos = ImGui::GetCursorScreenPos();
-        const ImVec2 size = ImGui::GetContentRegionAvail();
-        cs::Rect bounds{pos.x, pos.y, size.x, size.y};
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        const TreemapResult res = gui::draw_treemap(dl, g_tree, g_current, bounds, g_threshold,
-                                                    g_basis, ImGui::IsWindowHovered());
-        if (res.otherClicked) {
-            g_otherNodes = res.otherNodes;
-            g_openOtherPopup = true;
-        } else if (res.clickedTree != cs::VolumeTree::kInvalid && g_tree.isDirectory(res.clickedTree) &&
-                   g_tree.node(res.clickedTree).childCount > 0) {
-            navigate_to(res.clickedTree);
-        }
-    } else if (!g_error.empty()) {
-        ImGui::TextWrapped("扫描失败：%s", cs::wide_to_utf8(g_error).c_str());
-    } else {
-        ImGui::TextUnformatted("选择一个卷，点击“扫描”。");
-        if (!g_volumeAccessible)
-            ImGui::TextColored(ImVec4(1, 0.6f, 0.2f, 1),
-                               "未以管理员身份运行：MFT 直读需要管理员权限。");
-    }
     ImGui::EndChild();
 }
 
@@ -594,8 +612,75 @@ void header_cell(const char* label, int col) {
     ImGui::PopStyleColor();
 }
 
+// 中文注释：把单行绘制从 draw_list_panel 拆出来，降低主列表函数的复杂度。
+void draw_child_row(uint32_t c, uint64_t total, ImDrawList* dl, float cellPad) {
+    const auto& n = g_tree.node(c);
+    const uint64_t sz = node_size(c);
+    const double pct =
+        total > 0 ? 100.0 * static_cast<double>(sz) / static_cast<double>(total) : 0.0;
+
+    ImGui::TableNextRow();
+    const ImVec2 rp = ImGui::GetCursorScreenPos();
+    const float rw = ImGui::GetContentRegionAvail().x;
+    const float rh = ImGui::GetTextLineHeight() + cellPad * 2.0f;
+    const ImU32 barCol = g_tree.isDirectory(c) ? IM_COL32(96, 130, 190, 46)
+                                               : IM_COL32(130, 170, 210, 38);
+    dl->AddRectFilled(rp,
+                      ImVec2(rp.x + static_cast<float>(rw * pct / 100.0), rp.y + rh),
+                      barCol, 3.0f);
+
+    ImGui::TableSetColumnIndex(0);
+    const ImVec2 sp = ImGui::GetCursorScreenPos();
+    const float ty = ImGui::GetTextLineHeight();
+    const ImU32 sw = g_tree.isDirectory(c) ? IM_COL32(88, 108, 150, 255)
+                                           : category_color(n.category);
+    dl->AddRectFilled(ImVec2(sp.x, sp.y + (ty - 9.0f) * 0.5f),
+                      ImVec2(sp.x + 9.0f, sp.y + (ty + 9.0f) * 0.5f), sw, 2.0f);
+    ImGui::Dummy(ImVec2(15.0f, 0.0f));
+    ImGui::SameLine(0.0f, 0.0f);
+
+    const std::string name = cs::wide_to_utf8(g_tree.nameString(c));
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.24f, 0.34f, 0.50f, 0.55f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.28f, 0.40f, 0.58f, 0.70f));
+    ImGui::Selectable(name.c_str(), false, ImGuiSelectableFlags_AllowOverlap);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s\n%s", name.c_str(), cs::human_size(sz).c_str());
+    if (ImGui::IsItemClicked() && g_tree.isDirectory(c) && n.childCount > 0) navigate_to(c);
+    ImGui::PopStyleColor(3);
+
+    if (ImGui::BeginPopupContextItem()) {
+        if (ImGui::MenuItem("在资源管理器中打开")) open_in_explorer(c);
+        const std::string path = cs::wide_to_utf8(build_path(c));
+        if (ImGui::MenuItem("复制路径")) ImGui::SetClipboardText(path.c_str());
+        if (ImGui::MenuItem("复制大小"))
+            ImGui::SetClipboardText(cs::human_size(sz).c_str());
+        ImGui::EndPopup();
+    }
+
+    ImGui::TableSetColumnIndex(1);
+    ImGui::TextUnformatted(cs::human_size(sz).c_str());
+    ImGui::TableSetColumnIndex(2);
+    ImGui::Text("%.1f%%", pct);
+}
+
 void draw_list_panel(float width, float height) {
     ImGui::BeginChild("list", ImVec2(width, height), ImGuiChildFlags_Borders);
+
+    if (g_scanning.load()) {
+        const uint64_t total = g_progress.totalRecords.load();
+        const uint64_t read = g_progress.recordsRead.load();
+        const float frac =
+            (total > 0) ? static_cast<float>(static_cast<double>(read) / total) : 0.0f;
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "%llu / %llu", static_cast<unsigned long long>(read),
+                      static_cast<unsigned long long>(total));
+        ImGui::TextUnformatted("正在扫描 MFT...");
+        ImGui::ProgressBar(frac, ImVec2(-1, 0), buf);
+        ImGui::Text("已读取 %s", cs::human_size(g_progress.bytesRead.load()).c_str());
+        ImGui::EndChild();
+        return;
+    }
 
     if (g_path.size() > 1) {
         if (ImGui::Button("↑")) navigate_up();
@@ -623,6 +708,7 @@ void draw_list_panel(float width, float height) {
                                   ImVec2(ImGui::CalcTextSize(seg.c_str()).x, 0.0f))) {
                 g_path.resize(i + 1);
                 g_current = g_path.back();
+                g_orderDirty = true;  // 中文注释：面包屑跳转后必须重建子项列表。
             }
             ImGui::PopStyleColor(2);
         }
@@ -630,6 +716,14 @@ void draw_list_panel(float width, float height) {
     ImGui::Separator();
 
     if (g_current == cs::VolumeTree::kInvalid) {
+        if (!g_error.empty()) {
+            ImGui::TextWrapped("扫描失败：%s", cs::wide_to_utf8(g_error).c_str());
+        } else {
+            ImGui::TextUnformatted("选择一个卷，点击“扫描”。");
+            if (!g_volumeAccessible)
+                ImGui::TextColored(ImVec4(1, 0.6f, 0.2f, 1),
+                                   "未以管理员身份运行：MFT 直读需要管理员权限。");
+        }
         ImGui::EndChild();
         return;
     }
@@ -639,8 +733,7 @@ void draw_list_panel(float width, float height) {
         g_orderDirty = true;
     if (g_orderDirty) refresh_children();
 
-    const auto& cur = g_tree.node(g_current);
-    const uint64_t total = cur.totalSize;
+    const uint64_t total = node_size(g_current);
 
     const ImGuiTableFlags tflags =
         ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit;
@@ -656,60 +749,11 @@ void draw_list_panel(float width, float height) {
 
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const float cellPad = ImGui::GetStyle().CellPadding.y;
-        for (uint32_t c : g_childOrder) {
-            const auto& n = g_tree.node(c);
-            const uint64_t sz = (g_basis == gui::SizeBasis::Logical) ? n.totalSize : n.totalAlloc;
-            const double pct =
-                total > 0 ? 100.0 * static_cast<double>(sz) / static_cast<double>(total) : 0.0;
-
-            ImGui::TableNextRow();
-            const ImVec2 rp = ImGui::GetCursorScreenPos();
-            const float rw = ImGui::GetContentRegionAvail().x;
-            const float rh = ImGui::GetTextLineHeight() + cellPad * 2.0f;
-            const ImU32 barCol = g_tree.isDirectory(c) ? IM_COL32(96, 130, 190, 46)
-                                                       : IM_COL32(130, 170, 210, 38);
-            dl->AddRectFilled(rp,
-                              ImVec2(rp.x + static_cast<float>(rw * pct / 100.0), rp.y + rh),
-                              barCol, 3.0f);
-
-            ImGui::TableSetColumnIndex(0);
-            const ImVec2 sp = ImGui::GetCursorScreenPos();
-            const float ty = ImGui::GetTextLineHeight();
-            const ImU32 sw = g_tree.isDirectory(c) ? IM_COL32(88, 108, 150, 255)
-                                                   : gui::category_color(n.category);
-            dl->AddRectFilled(ImVec2(sp.x, sp.y + (ty - 9.0f) * 0.5f),
-                              ImVec2(sp.x + 9.0f, sp.y + (ty + 9.0f) * 0.5f), sw, 2.0f);
-            ImGui::Dummy(ImVec2(15.0f, 0.0f));
-            ImGui::SameLine(0.0f, 0.0f);
-
-            const std::string name = cs::wide_to_utf8(g_tree.nameString(c));
-            ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.24f, 0.34f, 0.50f, 0.55f));
-            ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.28f, 0.40f, 0.58f, 0.70f));
-            ImGui::Selectable(name.c_str(), false, ImGuiSelectableFlags_AllowOverlap);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\n%s", name.c_str(),
-                                                          cs::human_size(sz).c_str());
-            if (ImGui::IsItemClicked() && g_tree.isDirectory(c) && n.childCount > 0) navigate_to(c);
-            ImGui::PopStyleColor(3);
-
-            if (ImGui::BeginPopupContextItem()) {
-                if (ImGui::MenuItem("在资源管理器中打开")) open_in_explorer(c);
-                const std::string path = cs::wide_to_utf8(build_path(c));
-                if (ImGui::MenuItem("复制路径")) ImGui::SetClipboardText(path.c_str());
-                if (ImGui::MenuItem("复制大小"))
-                    ImGui::SetClipboardText(cs::human_size(sz).c_str());
-                ImGui::EndPopup();
-            }
-
-            ImGui::TableSetColumnIndex(1);
-            ImGui::TextUnformatted(cs::human_size(sz).c_str());
-            ImGui::TableSetColumnIndex(2);
-            ImGui::Text("%.1f%%", pct);
-        }
-        if (g_childOrder.empty() && g_filter[0] != '\0') {
+        for (uint32_t c : g_childOrder) draw_child_row(c, total, dl, cellPad);
+        if (g_childOrder.empty()) {
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
-            ImGui::TextDisabled("无匹配项");
+            ImGui::TextDisabled(g_filter[0] != '\0' ? "无匹配项" : "没有可显示的项");
         }
         ImGui::EndTable();
     }
@@ -725,7 +769,7 @@ void draw_status() {
     } else if (!g_error.empty()) {
         ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "%s", cs::wide_to_utf8(g_error).c_str());
     } else if (g_current != cs::VolumeTree::kInvalid) {
-        const uint64_t total = g_tree.node(g_tree.root()).totalSize;
+        const uint64_t total = node_size(g_tree.root());
         ImGui::Text("合计 %s", cs::human_size(total).c_str());
         ImGui::SameLine(0, 16);
         ImGui::TextDisabled("文件 %llu",
@@ -733,6 +777,12 @@ void draw_status() {
         ImGui::SameLine(0, 12);
         ImGui::TextDisabled("文件夹 %llu",
                             static_cast<unsigned long long>(g_progress.dirCount.load()));
+        if (g_filteredCount > 0) {
+            ImGui::SameLine(0, 16);
+            ImGui::TextDisabled("已过滤 %llu 项 / 合计 %s",
+                                static_cast<unsigned long long>(g_filteredCount),
+                                cs::human_size(g_filteredBytes).c_str());
+        }
         const uint64_t orphN = g_progress.orphanNodes.load();
         const uint64_t orphB = g_progress.orphanBytes.load();
         if (orphN > 0 && orphB * 500u > total) {  // only when non-negligible (>0.2%)
@@ -749,15 +799,15 @@ void draw_status() {
 
     // Right-aligned legend.
     float legendW = ImGui::CalcTextSize("图例").x + 10.0f;
-    for (int cat = 1; cat <= 7; ++cat)
-        legendW += 14.0f + ImGui::CalcTextSize(gui::category_name(cat)).x + 8.0f;
+    for (uint8_t cat = 1; cat <= 7; ++cat)
+        legendW += 14.0f + ImGui::CalcTextSize(category_name(cat)).x + 8.0f;
     const float x = ImGui::GetWindowContentRegionMax().x - legendW;
     if (x > ImGui::GetCursorPosX() + 20.0f) {
         ImGui::SameLine(x);
         ImGui::TextDisabled("图例");
         for (uint8_t cat = 1; cat <= 7; ++cat) {
             ImGui::SameLine();
-            const ImU32 col = gui::category_color(cat);
+            const ImU32 col = category_color(cat);
             const ImVec2 sp = ImGui::GetCursorScreenPos();
             const float ty = ImGui::GetTextLineHeight();
             ImGui::GetWindowDrawList()->AddRectFilled(
@@ -765,7 +815,7 @@ void draw_status() {
                 ImVec2(sp.x + 10.0f, sp.y + (ty + 9.0f) * 0.5f), col, 2.0f);
             ImGui::Dummy(ImVec2(13.0f, 0.0f));
             ImGui::SameLine(0, 0);
-            ImGui::TextUnformatted(gui::category_name(cat));
+            ImGui::TextUnformatted(category_name(cat));
         }
     }
     ImGui::EndChild();
@@ -786,13 +836,9 @@ void draw_frame() {
     const float statusH = ImGui::GetFrameHeight() + st.WindowPadding.y * 2.0f;
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const float panelH = avail.y - statusH - st.ItemSpacing.y;
-    const float leftW = avail.x * 0.60f;
 
-    draw_treemap_panel(leftW, panelH);
-    ImGui::SameLine();
     draw_list_panel(0.0f, panelH);
     draw_status();
-    draw_other_popup();
 
     ImGui::End();
 }
@@ -808,10 +854,10 @@ int run() {
     wc.lpfnWndProc = wnd_proc;
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.lpszClassName = L"ComputeSpaceV2Wnd";
+    wc.lpszClassName = L"SpaceLensWnd";
     RegisterClassExW(&wc);
 
-    HWND hwnd = CreateWindowW(wc.lpszClassName, L"Compute Space v2 - 磁盘空间分析",
+    HWND hwnd = CreateWindowW(wc.lpszClassName, L"SpaceLens - 磁盘空间分析",
                               WS_OVERLAPPEDWINDOW, 80, 80, 1280, 820, nullptr, nullptr,
                               wc.hInstance, nullptr);
     if (hwnd == nullptr || !create_device(hwnd)) {
@@ -820,7 +866,13 @@ int run() {
         UnregisterClassW(wc.lpszClassName, wc.hInstance);
         return 1;
     }
-    create_rtv();
+    if (!create_rtv()) {
+        dbg("create_rtv failed");
+        cleanup_device();
+        DestroyWindow(hwnd);
+        UnregisterClassW(wc.lpszClassName, wc.hInstance);
+        return 1;
+    }
     dbg("device + swapchain created");
     ShowWindow(hwnd, SW_SHOWDEFAULT);
     UpdateWindow(hwnd);
@@ -844,7 +896,7 @@ int run() {
     if (dev_recursive_dir(devDir)) start_scan();  // auto-start for dev smoke tests
     {
         wchar_t cap[1024] = {};
-        if (GetEnvironmentVariableW(L"COMPUTE_SPACE_CAPTURE", cap, 1024) > 0)
+        if (GetEnvironmentVariableW(L"SPACELENS_CAPTURE", cap, 1024) > 0)
             g_capturePath = cap;
     }
 
@@ -867,10 +919,13 @@ int run() {
 
         if (g_resizeW != 0 && g_resizeH != 0) {
             cleanup_rtv();
-            g_swapChain->ResizeBuffers(0, g_resizeW, g_resizeH, DXGI_FORMAT_UNKNOWN, 0);
+            const HRESULT resizeHr =
+                g_swapChain->ResizeBuffers(0, g_resizeW, g_resizeH, DXGI_FORMAT_UNKNOWN, 0);
             g_resizeW = 0;
             g_resizeH = 0;
-            create_rtv();
+            // 中文注释：ResizeBuffers 失败时保留空 RTV，下面会跳过渲染而不是
+            // 把空指针交给 OMSetRenderTargets/ClearRenderTargetView。
+            if (FAILED(resizeHr) || !create_rtv()) dbg("resize/recreate RTV failed");
         }
 
         ImGui_ImplDX11_NewFrame();
@@ -882,9 +937,11 @@ int run() {
 
         ImGui::Render();
         const float clear[4] = {0.07f, 0.07f, 0.08f, 1.0f};
-        g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
-        g_context->ClearRenderTargetView(g_rtv, clear);
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        if (g_rtv != nullptr) {
+            g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
+            g_context->ClearRenderTargetView(g_rtv, clear);
+            ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        }
 
         if (!g_capturePath.empty() && frame == 120) {
             save_backbuffer_bmp(g_capturePath);
@@ -904,7 +961,15 @@ int run() {
         }
     }
 
-    if (g_worker.joinable()) g_worker.join();
+    // 中文注释：退出前先请求取消并取回 future，避免后台线程继续访问即将销毁的
+    // 全局对象（也更不会在进程退出阶段触发 std::terminate）。
+    g_progress.cancel.store(true, std::memory_order_relaxed);
+    if (g_scanFuture.valid()) {
+        try {
+            g_scanFuture.get();
+        } catch (...) {
+        }
+    }
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();

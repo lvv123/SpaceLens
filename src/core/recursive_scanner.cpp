@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include <exception>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -15,10 +17,18 @@ std::wstring join_star(const std::wstring& dir) {
     return dir + L"\\*";
 }
 
-}  // namespace
+bool scan_directory_recursive_impl(const std::wstring& path, VolumeTree& tree,
+                                   ScanProgress& progress, std::wstring& error) {
+    // 中文注释：调用方负责在启动前用 ScanProgress::reset() 清零进度。这里
+    // 不能再次 reset，否则会把用户刚设置的 cancel 标志覆盖掉。
+    if (progress.cancel.load(std::memory_order_relaxed)) {
+        tree.clear();
+        error = L"扫描已取消";
+        progress.finished.store(false, std::memory_order_relaxed);
+        progress.failed.store(true, std::memory_order_relaxed);
+        return false;
+    }
 
-bool scan_directory_recursive(const std::wstring& path, VolumeTree& tree,
-                              ScanProgress& progress, std::wstring& error) {
     tree.clear();
     error.clear();
 
@@ -70,6 +80,15 @@ bool scan_directory_recursive(const std::wstring& path, VolumeTree& tree,
         FindClose(h);
     }
 
+    // 中文注释：取消后不发布半成品目录树，也不把本次扫描标记为完成。
+    if (progress.cancel.load(std::memory_order_relaxed)) {
+        tree.clear();
+        error = L"扫描已取消";
+        progress.finished.store(false, std::memory_order_relaxed);
+        progress.failed.store(true, std::memory_order_relaxed);
+        return false;
+    }
+
     tree.aggregate();
     tree.sortChildrenBySizeDesc();
     {
@@ -82,6 +101,29 @@ bool scan_directory_recursive(const std::wstring& path, VolumeTree& tree,
     }
     progress.finished.store(true, std::memory_order_relaxed);
     return true;
+}
+
+}  // namespace
+
+bool scan_directory_recursive(const std::wstring& path, VolumeTree& tree,
+                              ScanProgress& progress, std::wstring& error) {
+    // 中文注释：扫描过程中可能因目录规模过大触发内存分配失败，绝不能让异常
+    // 穿透到 GUI 工作线程导致 std::terminate。
+    try {
+        return scan_directory_recursive_impl(path, tree, progress, error);
+    } catch (const std::bad_alloc&) {
+        tree.clear();
+        error = L"内存不足，扫描已中止";
+        progress.finished.store(false, std::memory_order_relaxed);
+        progress.failed.store(true, std::memory_order_relaxed);
+        return false;
+    } catch (const std::exception&) {
+        tree.clear();
+        error = L"扫描时发生内部异常";
+        progress.finished.store(false, std::memory_order_relaxed);
+        progress.failed.store(true, std::memory_order_relaxed);
+        return false;
+    }
 }
 
 }  // namespace cs

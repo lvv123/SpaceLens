@@ -37,6 +37,34 @@ struct ScanProgress {
     std::atomic<bool>     cancel{false};
     std::atomic<bool>     finished{false};
     std::atomic<bool>     failed{false};
+
+    // 中文注释：一次扫描开始前把全部计数和状态清零。逐个字段重置比赋值整个
+    // 结构体安全，因为 std::atomic 不可拷贝；cancel 也由调用方在需要时预先设置。
+    void reset() {
+        recordsRead.store(0, std::memory_order_relaxed);
+        totalRecords.store(0, std::memory_order_relaxed);
+        bytesRead.store(0, std::memory_order_relaxed);
+        fileCount.store(0, std::memory_order_relaxed);
+        dirCount.store(0, std::memory_order_relaxed);
+        orphanNodes.store(0, std::memory_order_relaxed);
+        orphanBytes.store(0, std::memory_order_relaxed);
+        orphanNoParent.store(0, std::memory_order_relaxed);
+        orphanSeqMismatch.store(0, std::memory_order_relaxed);
+        orphanParentOutOfRange.store(0, std::memory_order_relaxed);
+        orphanParentNotInUse.store(0, std::memory_order_relaxed);
+        orphanParentNotDir.store(0, std::memory_order_relaxed);
+        orphanParentNoNode.store(0, std::memory_order_relaxed);
+        recordsNotInUse.store(0, std::memory_order_relaxed);
+        recordsMetadata.store(0, std::memory_order_relaxed);
+        recordsNoName.store(0, std::memory_order_relaxed);
+        recordsFixupFail.store(0, std::memory_order_relaxed);
+        recordsParseFail.store(0, std::memory_order_relaxed);
+        sizeFollowAttempts.store(0, std::memory_order_relaxed);
+        sizeFollowSuccess.store(0, std::memory_order_relaxed);
+        cancel.store(false, std::memory_order_relaxed);
+        finished.store(false, std::memory_order_relaxed);
+        failed.store(false, std::memory_order_relaxed);
+    }
 };
 
 // Drive roots of local NTFS volumes, e.g. {"C:", "D:"}.

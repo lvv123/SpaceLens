@@ -1,8 +1,8 @@
 #pragma once
 
-// Arena (flat-array) volume tree. Built once, then queried by the UI and the
-// treemap layout. Children are kept in a singly linked list ordered by
-// descending subtree size after aggregate()/sortChildrenBySizeDesc().
+// Arena (flat-array) volume tree. Built once, then queried by the UI.
+// Children are kept in a singly linked list ordered by descending subtree size
+// after aggregate()/sortChildrenBySizeDesc().
 
 #include <cstdint>
 #include <string>
