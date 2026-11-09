@@ -1,13 +1,18 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(compute_space_v2
+project(spacelens
     VERSION 0.1.0
-    DESCRIPTION "Compute Space v2 - NTFS disk usage analyzer"
+    DESCRIPTION "SpaceLens - NTFS disk usage analyzer"
     LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Static CRT (/MT): the exe must run on a machine without the VC++ redistributable,
+# so spacelens.exe can be copied to another Windows PC and launched as-is.
+# Requires CMP0091 = NEW (implied by cmake_minimum_required 3.20).
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 # Performance first: default to Release (optimized) builds.
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -24,14 +29,13 @@ endif()
 add_compile_definitions(UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 
 # ---- core library (no UI dependencies) ----
-add_library(compute_core STATIC
+add_library(spacelens_core STATIC
     src/core/ntfs.cpp
     src/core/tree.cpp
-    src/core/treemap.cpp
     src/core/mft_scanner.cpp
     src/core/recursive_scanner.cpp
 )
-target_include_directories(compute_core PUBLIC include)
+target_include_directories(spacelens_core PUBLIC include)
 
 # ---- Dear ImGui (pinned git submodule) ----
 add_library(imgui STATIC
@@ -50,37 +54,34 @@ else()
 endif()
 
 # ---- GUI application ----
-add_executable(compute_space_v2 WIN32
+add_executable(spacelens WIN32
     src/main.cpp
     src/gui/app.cpp
-    src/gui/treemap_view.cpp
 )
-target_include_directories(compute_space_v2 PRIVATE include src)
-target_link_libraries(compute_space_v2 PRIVATE compute_core imgui
+target_include_directories(spacelens PRIVATE include src)
+target_link_libraries(spacelens PRIVATE spacelens_core imgui
     d3d11 dxgi d3dcompiler dwmapi shell32)
 
 # Request administrator (MFT direct read needs to open the volume).
 # Turn this off only to run automated GUI smoke tests without a UAC prompt.
-option(COMPUTE_SPACE_NO_ADMIN_MANIFEST "Build the GUI without the requireAdministrator manifest" OFF)
-if(MSVC AND NOT COMPUTE_SPACE_NO_ADMIN_MANIFEST)
-    target_link_options(compute_space_v2 PRIVATE "/MANIFESTUAC:level='requireAdministrator'")
+option(SPACELENS_NO_ADMIN_MANIFEST "Build the GUI without the requireAdministrator manifest" OFF)
+if(MSVC AND NOT SPACELENS_NO_ADMIN_MANIFEST)
+    target_link_options(spacelens PRIVATE "/MANIFESTUAC:level='requireAdministrator'")
 endif()
 
 # ---- tests ----
 include(CTest)
 if(BUILD_TESTING)
     add_executable(unit_tests tests/unit_tests.cpp)
-    target_link_libraries(unit_tests PRIVATE compute_core)
+    target_link_libraries(unit_tests PRIVATE spacelens_core)
     add_test(NAME unit_tests COMMAND unit_tests)
 endif()
 
 # ---- optional dev tools ----
-option(COMPUTE_SPACE_TOOLS "Build developer/QA tools" OFF)
-if(COMPUTE_SPACE_TOOLS)
-    add_executable(treemap_image tools/treemap_image.cpp)
-    target_link_libraries(treemap_image PRIVATE compute_core gdiplus)
+option(SPACELENS_TOOLS "Build developer/QA tools" OFF)
+if(SPACELENS_TOOLS)
     add_executable(mft_scan tools/mft_scan.cpp)
-    target_link_libraries(mft_scan PRIVATE compute_core)
+    target_link_libraries(mft_scan PRIVATE spacelens_core)
     add_executable(mft_record tools/mft_record.cpp)
-    target_link_libraries(mft_record PRIVATE compute_core)
+    target_link_libraries(mft_record PRIVATE spacelens_core)
 endif()
